@@ -384,8 +384,6 @@ function processFollowUpsBySerial_(force = false) {
   return { emailsSent };
 }
 
-// [REPLACE your existing processFullPaymentFollowUps_ function with this]
-// [REPLACE your existing processFullPaymentFollowUps_ function with this]
 function processFullPaymentFollowUps_(force = false) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName(CONFIG.SHEET_NAMES.DATABASE);
@@ -429,19 +427,47 @@ function processFullPaymentFollowUps_(force = false) {
         return;
       }
 
-      // ... [rest of the email logic from the previous correct version] ...
+      const dueOnly = dateOnly_(fpDueDate);
+      const daysOverdue = Math.ceil((today.getTime() - dueOnly.getTime()) / (1000 * 60 * 60 * 24));
       
-      let email; // This will be populated by your if/else if logic for sending emails
+      const emailData = {
+        clientName: toTitleCase_(row[H.name] || row[H.business] || firstNameFromEmail_(row[H.email])),
+        serialNo: row[H.serial],
+        campaign: row[H.campaign] || 'engagement',
+        businessName: toTitleCase_(row[H.business] || row[H.name]),
+        dueDateStr: fmtDate_(dueOnly),
+        receivablesStr: toPhp_(receivables),
+        contractPriceStr: toPhp_(row[H.givenAmount]),
+        todayStr: fmtDate_(today),
+      };
       
-      if (email) { // Assuming the email object was created
-        // ... (MailApp.sendEmail call) ...
-        emailsSent++;
-        updatedTimestamps[i][0] = new Date();
-        
-        // This is a placeholder for your forfeiture logic
-        if (daysOverdue >= 8) {
-            updatedStatusesArr[i][0] = 'FORFEITED';
-            updatedStatuses++;
+      let email;
+
+      // --- THIS IS THE FULL LOGIC THAT WAS MISSING ---
+      if (daysOverdue === -1) { // 1 Day Before Due
+        email = buildFpReminderEmail_(emailData);
+      } else if (daysOverdue === 0) { // Due Today
+        email = buildFpDueTodayEmail_(emailData);
+      } else if (daysOverdue >= 1 && daysOverdue <= 5) { // 1-5 Days Overdue
+        emailData.daysPastDue = daysOverdue;
+        email = buildFpOverdueEmail_(emailData);
+      } else if (daysOverdue >= 6 && daysOverdue <= 7) { // 6-7 Days Overdue (Urgent)
+        emailData.daysPastDue = daysOverdue;
+        emailData.penaltyAmountStr = toPhp_(row[H.givenAmount] * 0.30);
+        emailData.newTotalStr = toPhp_(receivables + (row[H.givenAmount] * 0.30));
+        email = buildFpUrgentEmail_(emailData);
+      } else if (daysOverdue >= 8) { // 8+ Days Overdue (Forfeiture)
+        email = buildFpForfeitureEmail_(emailData);
+        updatedStatusesArr[i][0] = 'FORFEITED';
+        updatedStatuses++;
+      }
+
+      if (email) {
+        const clientEmail = String(row[H.email] || '').split(/[;,]/)[0].trim();
+        if (clientEmail) {
+          MailApp.sendEmail({ to: clientEmail, subject: email.subject, htmlBody: email.html });
+          updatedTimestamps[i][0] = new Date();
+          emailsSent++;
         }
       }
 
@@ -452,12 +478,10 @@ function processFullPaymentFollowUps_(force = false) {
 
   // --- Write ONLY to the specific columns that were changed ---
   if (emailsSent > 0) {
-    const lastRow = updatedTimestamps.length + 4; // +4 because data starts at row 5
-    sheet.getRange('T5:T' + lastRow).setValues(updatedTimestamps);
+    sheet.getRange('T5:T' + (updatedTimestamps.length + 4)).setValues(updatedTimestamps);
   }
   if (updatedStatuses > 0) {
-    const lastRow = updatedStatusesArr.length + 4;
-    sheet.getRange('S5:S' + lastRow).setValues(updatedStatusesArr);
+    sheet.getRange('S5:S' + (updatedStatusesArr.length + 4)).setValues(updatedStatusesArr);
   }
 
   return { emailsSent, updatedStatuses };
