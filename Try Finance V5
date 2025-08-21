@@ -34,6 +34,60 @@ const CUTOFF_MINUTE  = 0;
 
 // --- HELPERS ---
 
+// [PASTE THIS ENTIRE BLOCK into your HELPERS section]
+
+/**
+ * Extracts and maps data from the Invoice Encoder form values.
+ * @param {any[][]} values - The 2D array of values from the InvoiceDataRange.
+ * @returns {object} An object containing all the named data points.
+ */
+function extractInvoiceData_(values) {
+  const IDX = {
+    date: 0, tin: 1, fullName: 2, business: 3, address: 4, city: 5, zip: 6,
+    campaign: 7, amount: 8, dpDue: 9, fpDue: 10, email: 11, serial: 12, timeSent: 13
+  };
+  
+  const data = {};
+  data.entryDate = values[IDX.date][0];
+  data.tin = values[IDX.tin][0];
+  data.clientName = values[IDX.fullName][0];
+  data.business = values[IDX.business][0];
+  data.address = values[IDX.address][0];
+  data.city = values[IDX.city][0];
+  data.zip = values[IDX.zip][0];
+  data.campaign = values[IDX.campaign][0];
+  data.amountRaw = values[IDX.amount][0];
+  data.dpDueDate = values[IDX.dpDue][0];
+  data.fpDueDate = values[IDX.fpDue][0];
+  data.clientEmail = values[IDX.email][0];
+  data.serialNo = values[IDX.serial][0];
+  data.timeSent = new Date();
+  data.amountNum = (typeof data.amountRaw === 'number') ? data.amountRaw : parseFloat(String(data.amountRaw).replace(/[^\d.-]/g, '')) || 0;
+  
+  return data;
+}
+
+/**
+ * Extracts and maps data from the AR Encoder form values.
+ * @param {any[][]} values - The 2D array of values from the ArDataRange.
+ * @returns {object} An object containing all the named data points.
+ */
+function extractArData_(values) {
+  const displayValues = SpreadsheetApp.getActive().getRangeByName(CONFIG.NAMED_RANGES.AR_DATA).getDisplayValues();
+  const IDX = { date: 0, amount: 4, mode: 5, serial: 6, arNum: 7, name: 8, email: 10 };
+
+  const data = {};
+  data.dateReceived = values[IDX.date][0];
+  data.amountRaw = values[IDX.amount][0];
+  data.modeOfPayment = values[IDX.mode][0];
+  data.serialInvoiceNo = String(values[IDX.serial][0] || '').trim();
+  data.arNumber = String(values[IDX.arNum][0] || '').trim();
+  data.clientNameRaw = displayValues[IDX.name][0];
+  data.clientEmail = String(values[IDX.email][0] || '').trim();
+
+  return data;
+}
+
 function addDays_(d, n) {
   const x = new Date(d);
   x.setDate(x.getDate() + n);
