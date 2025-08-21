@@ -402,7 +402,6 @@ function processFullPaymentFollowUps_(force = false) {
     receivables: 17, status: 18, lastFollowUp: 19
   };
 
-  // --- FIX: Read from the 'sheet', not 'dataRange' ---
   const updatedStatusesArr = sheet.getRange('S5:S' + lastRow).getValues();
   const updatedTimestamps = sheet.getRange('T5:T' + lastRow).getValues();
 
@@ -443,19 +442,20 @@ function processFullPaymentFollowUps_(force = false) {
       
       let email;
 
-      if (daysOverdue === -1) {
+      // --- THIS IS THE FULL LOGIC THAT WAS MISSING ---
+      if (daysOverdue === -1) { // 1 Day Before Due
         email = buildFpReminderEmail_(emailData);
-      } else if (daysOverdue === 0) {
+      } else if (daysOverdue === 0) { // Due Today
         email = buildFpDueTodayEmail_(emailData);
-      } else if (daysOverdue >= 1 && daysOverdue <= 5) {
+      } else if (daysOverdue >= 1 && daysOverdue <= 5) { // 1-5 Days Overdue
         emailData.daysPastDue = daysOverdue;
         email = buildFpOverdueEmail_(emailData);
-      } else if (daysOverdue >= 6 && daysOverdue <= 7) {
+      } else if (daysOverdue >= 6 && daysOverdue <= 7) { // 6-7 Days Overdue (Urgent)
         emailData.daysPastDue = daysOverdue;
         emailData.penaltyAmountStr = toPhp_(row[H.givenAmount] * 0.30);
         emailData.newTotalStr = toPhp_(receivables + (row[H.givenAmount] * 0.30));
         email = buildFpUrgentEmail_(emailData);
-      } else if (daysOverdue >= 8) {
+      } else if (daysOverdue >= 8) { // 8+ Days Overdue (Forfeiture)
         email = buildFpForfeitureEmail_(emailData);
         updatedStatusesArr[i][0] = 'FORFEITED';
         updatedStatuses++;
@@ -469,11 +469,13 @@ function processFullPaymentFollowUps_(force = false) {
           emailsSent++;
         }
       }
+
     } catch (e) {
       Logger.log(`Error processing row ${i + 5} (Serial: ${row[H.serial]}): ${e.message}`);
     }
   });
 
+  // --- Write ONLY to the specific columns that were changed ---
   if (emailsSent > 0) {
     sheet.getRange('T5:T' + lastRow).setValues(updatedTimestamps);
   }
