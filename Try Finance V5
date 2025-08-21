@@ -126,6 +126,7 @@ function buildDownpaymentEmail_({
   return { subject, html: body };
 }
 
+// [REPLACE your existing encodeInvoiceReceipt function with this]
 function encodeInvoiceReceipt() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const ui = safeGetUi_();
@@ -163,7 +164,7 @@ function encodeInvoiceReceipt() {
     const timeSent = new Date();
     const amountNum = (typeof amountRaw === 'number') ? amountRaw : parseFloat(String(amountRaw).replace(/[^\d.-]/g, '')) || 0;
 
-    const pdfBlob = exportSheetRangeToPdf_(CONFIG.SHEET_NAMES.INVOICE_ENCODER, CONFIG.NAMED_RANGES.INVOICE_PDF, `Invoice-${serialNo}.pdf`);
+    const pdfBlob = exportSheetRangeToPdf_(CONFIG.SHEET_NAMES.INVOICE_ENCODER, CONFIG.NAMED_RANGES.INVOICE_PDF, `Invoice-${serialNo || 'NA'}.pdf`);
 
     const { subject: dpSubject, html: dpHtml } = buildDownpaymentEmail_({
       fullName: clientName, business: business, campaign: campaign, meetingDate: entryDate,
@@ -172,11 +173,19 @@ function encodeInvoiceReceipt() {
 
     MailApp.sendEmail({ to: clientEmail, subject: dpSubject, htmlBody: dpHtml, attachments: [pdfBlob] });
 
-    // THIS IS THE DATA TRANSFER STEP
-    dbSheet.appendRow([
+    // --- SMART DATA TRANSFER (WITH ROW 5 GUARANTEE) ---
+    // 1. Find the first empty row, ensuring it's never higher than row 5
+    const lastDataRow = dbSheet.getRange('A:A').getValues().filter(String).length;
+    const firstEmptyRow = Math.max(5, lastDataRow + 1);
+
+    // 2. Prepare the data for the 14 columns (A to N)
+    const newRowData = [[
       serialNo, entryDate, campaign, clientName, tin, business, address,
       city, zip, clientEmail, timeSent, amountNum, dpDueDate, fpDueDate
-    ]);
+    ]];
+
+    // 3. Write data ONLY to columns A through N for that specific row.
+    dbSheet.getRange(firstEmptyRow, 1, 1, 14).setValues(newRowData);
 
     const clearRange = ss.getRangeByName(CONFIG.NAMED_RANGES.INVOICE_CLEAR);
     if (clearRange) clearRange.clearContent();
@@ -184,60 +193,6 @@ function encodeInvoiceReceipt() {
     ss.toast('Invoice receipt processed and sent successfully!', 'Success', 5);
   } catch (e) {
     Logger.log(`Error in encodeInvoiceReceipt: ${e.message}`);
-    if (ui) ui.alert('An Error Occurred', e.message, ui.ButtonSet.OK);
-  }
-}
-
-function encodeAcknowledgementReceipt() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const ui = safeGetUi_();
-  try {
-    const sheet = ss.getSheetByName(CONFIG.SHEET_NAMES.AR_ENCODER);
-    const dbSheet = ss.getSheetByName(CONFIG.SHEET_NAMES.SALES_DB);
-    if (!sheet || !dbSheet) throw new Error(`Sheet '${CONFIG.SHEET_NAMES.AR_ENCODER}' or '${CONFIG.SHEET_NAMES.SALES_DB}' not found.`);
-
-    const dataRange = ss.getRangeByName(CONFIG.NAMED_RANGES.AR_DATA);
-    if (!dataRange) throw new Error(`Named Range "${CONFIG.NAMED_RANGES.AR_DATA}" not found.`);
-    const values = dataRange.getValues();
-    const displayValues = dataRange.getDisplayValues();
-
-    const IDX = { date: 0, amount: 4, mode: 5, serial: 6, arNum: 7, name: 8, email: 10 };
-    const dateReceived = values[IDX.date][0];
-    const amountRaw = values[IDX.amount][0];
-    const modeOfPayment = values[IDX.mode][0];
-    const serialInvoiceNo = values[IDX.serial][0];
-    const arNumber = values[IDX.arNum][0];
-    const clientNameRaw = displayValues[IDX.name][0];
-    const clientEmail = values[IDX.email][0];
-
-    if (!clientEmail || !arNumber || !serialInvoiceNo || !amountRaw) {
-      throw new Error('Client Email, AR No., Serial No., and Amount are required.');
-    }
-
-    const pdfBlob = exportSheetRangeToPdf_(CONFIG.SHEET_NAMES.AR_ENCODER, CONFIG.NAMED_RANGES.AR_PDF, `AR-${arNumber}.pdf`);
-    const folder = getOrCreateFolder_('Acknowledgement Receipts');
-    const pdfFile = folder.createFile(pdfBlob);
-
-    const clientFirstName = toTitleCase_((clientNameRaw || '').trim().split(/\s+/)[0] || firstNameFromEmail_(clientEmail));
-    const amountDisplay = toPhp_(amountRaw);
-    
-    const emailSubject = `Got it! Your payment for Invoice #${serialInvoiceNo} is confirmed.`;
-    const emailHtmlBody = `<p>Hi ${clientFirstName},</p><p>Hope you're having a great week!</p><p>Just a quick note to let you know that we've successfully received your payment of <b>${amountDisplay}</b>. We've already applied it to Invoice <b>#${serialInvoiceNo}</b>, so everything is now settled on our end.</p><p>Your official Acknowledgement Receipt (<b>AR #${arNumber}</b>) is attached for your records.</p><p>We truly appreciate your partnership and how easy you make it to work together. Thanks again for your trust in us!</p>${SHARED_EMAIL_COMPONENTS.signature}`;
-    
-    MailApp.sendEmail({ to: clientEmail, subject: emailSubject, htmlBody: emailHtmlBody, attachments: [pdfBlob] });
-
-    dbSheet.appendRow([
-      arNumber, serialInvoiceNo, dateOnly_(dateReceived), modeOfPayment,
-      (typeof amountRaw === 'number' ? amountRaw : parseFloat(String(amountRaw).replace(/[^\d.-]/g, '')) || 0),
-      '', '', '', pdfFile.getUrl()
-    ]);
-    
-    const AR_CLEAR_RANGES_TEMP = ['O12', 'O16:O18']; 
-    sheet.getRangeList(AR_CLEAR_RANGES_TEMP).clearContent();
-
-    ss.toast('Receipt processed, saved to Drive, and sent!', 'Success', 5);
-  } catch (e) {
-    Logger.log(`Error in encodeAcknowledgementReceipt: ${e.message}`);
     if (ui) ui.alert('An Error Occurred', e.message, ui.ButtonSet.OK);
   }
 }
