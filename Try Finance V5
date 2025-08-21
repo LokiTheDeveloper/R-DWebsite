@@ -325,8 +325,9 @@ function processFollowUpsBySerial_(force = false) {
   const sheet = ss.getSheetByName(CONFIG.SHEET_NAMES.DATABASE);
   if (!sheet) throw new Error(`Sheet '${CONFIG.SHEET_NAMES.DATABASE}' not found.`);
 
-  const dataRange = sheet.getRange('A5:T' + sheet.getLastRow());
-  if (dataRange.getNumRows() < 1) return { emailsSent: 0 };
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 5) return { emailsSent: 0 };
+  const dataRange = sheet.getRange('A5:T' + lastRow);
   const values = dataRange.getValues();
   const today = dateOnly_(new Date());
   let emailsSent = 0;
@@ -336,8 +337,8 @@ function processFollowUpsBySerial_(force = false) {
     givenAmount: 11, dpDueDate: 12, percentage: 14, lastFollowUp: 19 
   };
 
-  // --- Create a separate array to hold ONLY the updated timestamps ---
-  const updatedTimestamps = dataRange.getRange('T5:T').getValues();
+  // --- FIX: Read from the 'sheet', not 'dataRange' ---
+  const updatedTimestamps = sheet.getRange('T5:T' + lastRow).getValues();
 
   values.forEach((row, i) => {
     try {
@@ -368,30 +369,28 @@ function processFollowUpsBySerial_(force = false) {
       });
       MailApp.sendEmail(email, subject, "", { htmlBody: html });
       emailsSent++;
-      
-      // --- Update the timestamp in our separate array ---
       updatedTimestamps[i][0] = new Date();
-
     } catch (e) {
       Logger.log(`Error in DP Follow-up for row ${i + 5} (Serial: ${row[H.serial]}): ${e.message}`);
     }
   });
 
-  // --- Write ONLY to the Last Follow-Up Sent column (T) ---
   if (emailsSent > 0) {
-    sheet.getRange('T5:T' + (updatedTimestamps.length + 4)).setValues(updatedTimestamps);
+    sheet.getRange('T5:T' + lastRow).setValues(updatedTimestamps);
   }
   return { emailsSent };
 }
 
+
+// [REPLACE your existing processFullPaymentFollowUps_ function with this]
 function processFullPaymentFollowUps_(force = false) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName(CONFIG.SHEET_NAMES.DATABASE);
   if (!sheet) throw new Error(`Sheet '${CONFIG.SHEET_NAMES.DATABASE}' not found.`);
   
-  const dataRange = sheet.getRange('A5:T' + sheet.getLastRow());
-  if (dataRange.getNumRows() < 1) return { emailsSent: 0, updatedStatuses: 0 };
-  
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 5) return { emailsSent: 0, updatedStatuses: 0 };
+  const dataRange = sheet.getRange('A5:T' + lastRow);
   const values = dataRange.getValues();
   const today = dateOnly_(new Date());
   let emailsSent = 0;
@@ -403,8 +402,9 @@ function processFullPaymentFollowUps_(force = false) {
     receivables: 17, status: 18, lastFollowUp: 19
   };
 
-  const updatedStatusesArr = dataRange.getRange('S5:S' + dataRange.getLastRow()).getValues();
-  const updatedTimestamps = dataRange.getRange('T5:T' + dataRange.getLastRow()).getValues();
+  // --- FIX: Read from the 'sheet', not 'dataRange' ---
+  const updatedStatusesArr = sheet.getRange('S5:S' + lastRow).getValues();
+  const updatedTimestamps = sheet.getRange('T5:T' + lastRow).getValues();
 
   values.forEach((row, i) => {
     try {
@@ -443,20 +443,19 @@ function processFullPaymentFollowUps_(force = false) {
       
       let email;
 
-      // --- THIS IS THE FULL LOGIC THAT WAS MISSING ---
-      if (daysOverdue === -1) { // 1 Day Before Due
+      if (daysOverdue === -1) {
         email = buildFpReminderEmail_(emailData);
-      } else if (daysOverdue === 0) { // Due Today
+      } else if (daysOverdue === 0) {
         email = buildFpDueTodayEmail_(emailData);
-      } else if (daysOverdue >= 1 && daysOverdue <= 5) { // 1-5 Days Overdue
+      } else if (daysOverdue >= 1 && daysOverdue <= 5) {
         emailData.daysPastDue = daysOverdue;
         email = buildFpOverdueEmail_(emailData);
-      } else if (daysOverdue >= 6 && daysOverdue <= 7) { // 6-7 Days Overdue (Urgent)
+      } else if (daysOverdue >= 6 && daysOverdue <= 7) {
         emailData.daysPastDue = daysOverdue;
         emailData.penaltyAmountStr = toPhp_(row[H.givenAmount] * 0.30);
         emailData.newTotalStr = toPhp_(receivables + (row[H.givenAmount] * 0.30));
         email = buildFpUrgentEmail_(emailData);
-      } else if (daysOverdue >= 8) { // 8+ Days Overdue (Forfeiture)
+      } else if (daysOverdue >= 8) {
         email = buildFpForfeitureEmail_(emailData);
         updatedStatusesArr[i][0] = 'FORFEITED';
         updatedStatuses++;
@@ -470,18 +469,16 @@ function processFullPaymentFollowUps_(force = false) {
           emailsSent++;
         }
       }
-
     } catch (e) {
       Logger.log(`Error processing row ${i + 5} (Serial: ${row[H.serial]}): ${e.message}`);
     }
   });
 
-  // --- Write ONLY to the specific columns that were changed ---
   if (emailsSent > 0) {
-    sheet.getRange('T5:T' + (updatedTimestamps.length + 4)).setValues(updatedTimestamps);
+    sheet.getRange('T5:T' + lastRow).setValues(updatedTimestamps);
   }
   if (updatedStatuses > 0) {
-    sheet.getRange('S5:S' + (updatedStatusesArr.length + 4)).setValues(updatedStatusesArr);
+    sheet.getRange('S5:S' + lastRow).setValues(updatedStatusesArr);
   }
 
   return { emailsSent, updatedStatuses };
