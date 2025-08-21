@@ -415,9 +415,14 @@ function sendDailyFollowUps() {
 function sendDailyFollowUpsForce() {
   const ui = safeGetUi_(); // may be null outside UI
   try {
-    const result = processFollowUpsBySerial_(true);
-    if (ui) ui.alert('FORCED Follow-Ups Complete', `${result.emailsSent} follow-up emails have been sent (today’s stamp ignored).`, ui.ButtonSet.OK);
-    Logger.log(`FORCED Follow-Ups Complete: ${result.emailsSent} emails sent`);
+    // Calls both DP and FP follow-ups, passing 'true' to force them
+    const dpResult = processFollowUpsBySerial_(true);
+    const fpResult = processFullPaymentFollowUps_(true);
+    const totalEmails = dpResult.emailsSent + fpResult.emailsSent;
+
+    const message = `${totalEmails} follow-up emails have been sent (today’s stamps were ignored).\n\nDown Payments: ${dpResult.emailsSent}\nFull Payments: ${fpResult.emailsSent}`;
+    if (ui) ui.alert('FORCED Follow-Ups Complete', message, ui.ButtonSet.OK);
+    Logger.log(`FORCED Follow-Ups Complete: ${message}`);
   } catch (e) {
     Logger.log(e);
     if (ui) ui.alert('An Error Occurred', e.message, ui.ButtonSet.OK);
