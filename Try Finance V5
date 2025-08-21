@@ -50,6 +50,15 @@ function fmtDate_(d) {
   return Utilities.formatDate(d, Session.getScriptTimeZone(), 'MMMM d, yyyy');
 }
 
+function safeGetUi_() {
+  try {
+    return SpreadsheetApp.getUi();
+  } catch (_) {
+    // no UI in this context (e.g., time-based trigger / run from editor)
+    return null;
+  }
+}
+
 /**
  * Build official Down Payment email (subject + html) per spec.
  * Inputs:
@@ -125,9 +134,14 @@ function encodeInvoiceReceipt() {
       campaign: 7, amount: 8, dpDue: 9, fpDue: 10, email: 11, serial: 12, timeSent: 13
     };
 
-    const requiredIdx = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    // --- THIS IS THE FIX ---
+    // O12-O21 (indices 0-9) and O23 (index 11) are required. O22 (index 10) is now optional.
+    const requiredIdx = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11]; 
     for (const i of requiredIdx) {
-      if (values[i][0] === '') throw new Error('Please fill all required fields (O12–O24).');
+      if (values[i][0] === '') {
+        // Updated error message for clarity
+        throw new Error('Please fill all required fields. Note: Full Payment Due Date (O22) is optional.'); 
+      }
     }
     
     const entryDate = values[IDX.date][0];
@@ -140,13 +154,13 @@ function encodeInvoiceReceipt() {
     const campaign = values[IDX.campaign][0];
     const amountRaw = values[IDX.amount][0];
     const dpDueDate = values[IDX.dpDue][0];
-    const fpDueDate = values[IDX.fpDue][0];
+    const fpDueDate = values[IDX.fpDue][0]; // Still read, but now optional
     const clientEmail = values[IDX.email][0];
-    const serialNo = values[IDX.serial][0];
+    const serialNo = values[IDX.serial][0]; 
     const timeSent = new Date();
     const amountNum = (typeof amountRaw === 'number') ? amountRaw : parseFloat(String(amountRaw).replace(/[^\d.-]/g, '')) || 0;
 
-    const pdfBlob = exportSheetRangeToPdf_(CONFIG.SHEET_NAMES.INVOICE_ENCODER, CONFIG.NAMED_RANGES.INVOICE_PDF, `Invoice-${serialNo}.pdf`);
+    const pdfBlob = exportSheetRangeToPdf_(CONFIG.SHEET_NAMES.INVOICE_ENCODER, CONFIG.NAMED_RANGES.INVOICE_PDF, `Invoice-${serialNo || 'NA'}.pdf`);
 
     const { subject: dpSubject, html: dpHtml } = buildDownpaymentEmail_({
       fullName: clientName, business: business, campaign: campaign, meetingDate: entryDate,
