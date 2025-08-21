@@ -1,0 +1,559 @@
+/**
+ * @OnlyCurrentDoc
+ * This script creates a custom menu to automate invoice and receipt processing,
+ * and to send follow-up emails based on data in the spreadsheet.
+ */
+
+// --- CONFIGURATION CONSTANTS ---
+// Sheet Names
+const INVOICE_SHEET_NAME = 'RDRInvoiceReceiptEncoder';
+const INVOICE_DB_NAME = 'EntryDatabase';
+const AR_SHEET_NAME = 'AREncoder';
+const AR_DB_NAME = 'SalesDatabase';
+
+// Ranges
+const INVOICE_PDF_RANGE = 'B2:J26';
+const INVOICE_DATA_RANGE = 'O12:O25';
+const INVOICE_CLEAR_RANGE = 'O12:O23';
+const AR_PDF_RANGE = 'B2:J23';
+const AR_CLEAR_RANGES = ['O12', 'O16:O18'];
+
+function firstNameFromEmail_(email) {
+  if (!email) return "Boss";
+  const localPart = email.split('@')[0];
+  const firstChunk = localPart.split(/[.\-_]/)[0]; // before dot/dash/underscore
+  return firstChunk.charAt(0).toUpperCase() + firstChunk.slice(1);
+}
+
+
+/**
+ * Creates a custom menu in the spreadsheet UI when the file is opened.
+ */
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('Sales Tool')
+    .addItem('Encode Invoice Receipt', 'encodeInvoiceReceipt')
+    .addItem('Acknowledgement Receipt Encode', 'encodeAcknowledgementReceipt')
+    .addSeparator()
+    .addItem('Send Daily Follow-Ups', 'sendDailyFollowUps')       // normal (skip if already sent today)
+    .addItem('Force Send Follow-Ups (ignore today stamp)', 'sendDailyFollowUpsForce') // new
+    .addToUi();
+}
+
+/**
+ * Validates, processes, PDFs, emails, and logs a new invoice receipt.
+ */
+function encodeInvoiceReceipt() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(INVOICE_SHEET_NAME);
+  const ui = SpreadsheetApp.getUi();
+
+  try {
+    // 1. Validate required cells
+    const dataRange = sheet.getRange(INVOICE_DATA_RANGE);
+    const values = dataRange.getValues();
+    const requiredIndices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13]; // Corresponds to O12-O21, O23-O25
+    for (const index of requiredIndices) {
+      if (values[index][0] === '') {
+        ui.alert('Validation Error', `Required cell is empty. Please fill in all fields from O12-O21 and O23-O25.`, ui.ButtonSet.OK);
+        return;
+      }
+    }
+
+    // 2. Read values from the form
+    const [
+      entryDate, tin, clientName, business, address, city, zip,
+      campaign, amount, dpDueDate, fpDueDate, clientEmail, serialNo, timeSent
+    ] = [
+      values[0][0], values[1][0], values[2][0], values[3][0], values[4][0],
+      values[5][0], values[6][0], values[7][0], values[8][0], values[9][0],
+      values[10][0], values[11][0], values[12][0], values[13][0]
+    ];
+    
+    // 3. Create PDF
+    const pdfBlob = exportSheetRangeToPdf_(INVOICE_SHEET_NAME, INVOICE_PDF_RANGE, `Invoice-${serialNo}.pdf`);
+
+    // 4. Email the client
+    const emailSubject = `Invoice Receipt [${serialNo}] from RDR Business Solutions Inc.`;
+    const emailHtmlBody = `
+      <p>Dear ${clientName},</p>
+      <p>Please find your invoice receipt attached.</p>
+      <p><b>Summary:</b></p>
+      <ul>
+        <li>Serial No: ${serialNo}</li>
+        <li>Amount: ${amount.toLocaleString('en-PH', { style: 'currency', currency: 'PHP' })}</li>
+        <li>Downpayment Due: ${Utilities.formatDate(new Date(dpDueDate), Session.getScriptTimeZone(), "MMMM d, yyyy")}</li>
+      </ul>
+      <p>Thank you for your business.</p>
+    `;
+    MailApp.sendEmail({
+      to: clientEmail,
+      subject: emailSubject,
+      htmlBody: emailHtmlBody,
+      attachments: [pdfBlob]
+    });
+
+    // 5. Append a row to EntryDatabase
+    const dbSheet = ss.getSheetByName(INVOICE_DB_NAME);
+    dbSheet.appendRow([
+      serialNo, entryDate, campaign, clientName, tin, business, address,
+      city, zip, clientEmail, timeSent, amount, dpDueDate, fpDueDate
+    ]);
+
+    // 6. Clear form cells
+    sheet.getRange(INVOICE_CLEAR_RANGE).clearContent();
+
+    // 7. Toast success
+    ss.toast('Invoice receipt processed and sent successfully!', 'Success', 5);
+
+  } catch (e) {
+    Logger.log(e);
+    ui.alert('An Error Occurred', e.message, ui.ButtonSet.OK);
+  }
+}
+
+// --- MAIN MENU FUNCTIONS ---
+
+/**
+ * Validates, processes, PDFs, emails, saves to Drive, and logs an acknowledgement receipt.
+ * The process is ordered to generate and save the PDF first before other actions.
+ */
+// Resolve client's first name (from O20 or fallback to email)
+function encodeAcknowledgementReceipt() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+
+  try {
+    // --- 1. SETUP & DATA RETRIEVAL ---
+    const sheet = ss.getSheetByName(AR_SHEET_NAME);
+    const dbSheet = ss.getSheetByName(AR_DB_NAME);
+    if (!sheet || !dbSheet) {
+      throw new Error("Required sheet 'AREncoder' or 'SalesDatabase' not found.");
+    }
+
+    const dateReceived = sheet.getRange('O12').getValue();
+    const dateReceivedDisplay = sheet.getRange('O12').getDisplayValue(); // uses the sheet’s visible format
+    const amount = sheet.getRange('O16').getValue();
+    const amountDisplay = sheet.getRange('O16').getDisplayValue();       // uses the sheet’s visible format
+    const modeOfPayment = sheet.getRange('O17').getValue();
+    const serialInvoiceNo = sheet.getRange('O18').getValue();
+    const arNumber = sheet.getRange('O19').getValue();
+    const clientEmail = sheet.getRange('O22').getValue();
+
+    // --- 2. VALIDATION ---
+    if (!clientEmail || !arNumber || !serialInvoiceNo || !amount) {
+      ui.alert('Validation Error', 'Client Email, AR No., Serial No., and Amount are required.', ui.ButtonSet.OK);
+      return;
+    }
+
+    // --- 3. PDF GENERATION & STORAGE ---
+    // First, create the PDF in memory.
+   const pdfBlob = exportSheetRangeToPdf_(AR_SHEET_NAME, AR_PDF_RANGE, `AR-${arNumber}.pdf`);
+
+    
+    // Immediately save the PDF to Google Drive to get the file reference.
+    const folderName = "Acknowledgement Receipts";
+    const folder = getOrCreateFolder_(folderName);
+    const pdfFile = folder.createFile(pdfBlob); // The file is now saved.
+
+// Resolve client's first name (from O21 or fallback to email)
+let clientFirstName = "Boss";
+try {
+  const rawName = sheet.getRange('O20').getDisplayValue(); // OPTIONAL client name in AREncoder
+  if (rawName && rawName.trim()) {
+    clientFirstName = toTitleCase_(rawName.trim().split(/\s+/)[0]);
+  } else {
+    clientFirstName = firstNameFromEmail_(clientEmail);
+  }
+} catch (e) {
+  clientFirstName = firstNameFromEmail_(clientEmail);
+}
+
+
+ // --- 4. CLIENT COMMUNICATION ---
+// Prepare the email content.
+const emailSubject = `Got it! Your payment for Invoice #${serialInvoiceNo} is confirmed.`;
+
+const emailHtmlBody = `
+  <div style="font-family:Arial, sans-serif; font-size:14px; color:#222; line-height:1.5;">
+    <p>Hi Boss ${clientFirstName},</p>
+
+    <p>Hope you're having a great week!</p>
+
+    <p>Just a quick note to let you know that we've successfully received your payment of 
+    <b>${amountDisplay}</b>. We've already applied it to Invoice <b>#${serialInvoiceNo}</b>, so everything is now settled on our end.</p>
+
+    <p>Your official Acknowledgement Receipt (<b>AR #${arNumber}</b>) is attached for your records.</p>
+
+    <p>We truly appreciate your partnership and how easy you make it to work together. 
+    Thanks again for your trust in us, Boss!</p>
+
+    <p>Warm regards,</p>
+
+    <p><b>Ma. Sophia P. Martinez</b><br>
+    Collection Officer<br>
+    RDR Business Solutions, Inc.<br>
+    📧 <a href="mailto:finance@rdrcorporation.com">finance@rdrcorporation.com</a> | 📱 0945 559 6470</p>
+  </div>
+`;
+
+MailApp.sendEmail({
+  to: clientEmail,
+  subject: emailSubject,
+  htmlBody: emailHtmlBody,
+  attachments: [pdfBlob] // attach the AR PDF you generated above
+});
+
+
+
+    // --- 5. DATA LOGGING ---
+    // Append the transaction details to the database, including the Drive link.
+    dbSheet.appendRow([
+      arNumber,          // Column A
+      serialInvoiceNo,   // Column B
+      dateOnly_(dateReceived), // Column C
+      modeOfPayment,     // Column D
+      amount,            // Column E
+      '',                // Placeholder for empty Column F
+      '',                // Placeholder for empty Column G
+      '',                // Placeholder for empty Column H
+      pdfFile.getUrl()   // Correctly places the link in Column I
+    ]);
+
+    // --- 6. CLEANUP ---
+    // Clear the input fields for the next receipt.
+    sheet.getRangeList(AR_CLEAR_RANGES).clearContent();
+    ss.toast('Receipt processed, saved to Drive, and sent!', 'Success', 5);
+
+  } catch (e) {
+    Logger.log(e);
+    ui.alert('An Error Occurred', e.message, ui.ButtonSet.OK);
+  }
+}
+
+/**
+ * Sends conditional follow-up emails based on the proximity of the due date.
+ */
+function sendDailyFollowUps() {
+  const ui = SpreadsheetApp.getUi();
+  try {
+    const result = processFollowUpsBySerial_(/* force */ false);
+    ui.alert('Follow-Ups Complete', `${result.emailsSent} follow-up emails have been sent.`, ui.ButtonSet.OK);
+  } catch (e) {
+    Logger.log(e);
+    SpreadsheetApp.getUi().alert('An Error Occurred', e.message, ui.ButtonSet.OK);
+  }
+}
+
+function sendDailyFollowUpsForce() {
+  const ui = SpreadsheetApp.getUi();
+  try {
+    const result = processFollowUpsBySerial_(/* force */ true);
+    ui.alert('FORCED Follow-Ups Complete', `${result.emailsSent} follow-up emails have been sent (today’s stamp ignored).`, ui.ButtonSet.OK);
+  } catch (e) {
+    Logger.log(e);
+    SpreadsheetApp.getUi().alert('An Error Occurred', e.message, ui.ButtonSet.OK);
+  }
+}
+
+
+
+/**
+ * Creates a PDF from a range by copying to a temporary spreadsheet.
+ */
+function makePdfFromRange_(sheetName, rangeA1, pdfName) {
+  const sourceSs = SpreadsheetApp.getActiveSpreadsheet();
+  const sourceSheet = sourceSs.getSheetByName(sheetName);
+
+  // Create a temporary spreadsheet
+  const tempSs = SpreadsheetApp.create(`Temp - ${pdfName}`);
+  const tempId = tempSs.getId();
+  
+  // Copy the source sheet to the temporary spreadsheet
+  sourceSheet.copyTo(tempSs);
+
+  // Delete the default 'Sheet1' in the temp spreadsheet
+  tempSs.getSheetByName('Sheet1').activate();
+  tempSs.deleteActiveSheet();
+  
+  const copiedSheet = tempSs.getSheets()[0]; // The sheet we just copied
+  
+  // Get range dimensions
+  const range = copiedSheet.getRange(rangeA1);
+  const startRow = range.getRow();
+  const startCol = range.getColumn();
+  const numRows = range.getNumRows();
+  const numCols = range.getNumColumns();
+  
+  // Crop the sheet to the specified range
+  cropSheetToRange_(copiedSheet, startRow, startCol, numRows, numCols);
+
+  // Create the PDF and clean up
+  const pdfBlob = tempSs.getAs('application/pdf').setName(pdfName);
+  DriveApp.getFileById(tempId).setTrashed(true);
+
+  return pdfBlob;
+}
+
+
+/**
+ * Deletes all rows and columns outside of a specified range.
+ */
+function cropSheetToRange_(sheet, startRow, startCol, numRows, numCols) {
+  const maxRows = sheet.getMaxRows();
+  const maxCols = sheet.getMaxColumns();
+
+  // Delete rows after the range
+  if (maxRows > startRow + numRows - 1) {
+    sheet.deleteRows(startRow + numRows, maxRows - (startRow + numRows - 1));
+  }
+  // Delete rows before the range
+  if (startRow > 1) {
+    sheet.deleteRows(1, startRow - 1);
+  }
+  // Delete columns after the range
+  if (maxCols > startCol + numCols - 1) {
+    sheet.deleteColumns(startCol + numCols, maxCols - (startCol + numCols - 1));
+  }
+  // Delete columns before the range
+  if (startCol > 1) {
+    sheet.deleteColumns(1, startCol - 1);
+  }
+}
+
+/**
+ * Formats a Date object into "MMMM d, yyyy h:mm a" format.
+ */
+function formatFullDateTime_(val) {
+  if (!val || !(val instanceof Date)) return "";
+  return Utilities.formatDate(val, Session.getScriptTimeZone(), "MMMM d, yyyy h:mm a");
+}
+
+/**
+ * Returns a Date object with the time set to midnight (00:00:00).
+ */
+function dateOnly_(val) {
+  if (!val || !(val instanceof Date)) return null;
+  const date = new Date(val);
+  date.setHours(0, 0, 0, 0);
+  return date;
+  
+}
+
+/**
+ * Exports a specific range to a PDF blob using URL fetch (alternative method).
+ */
+function exportSheetRangeToPdf_(sheetName, rangeA1, filename) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(sheetName);
+  const sheetId = sheet.getSheetId();
+  
+  const url = `https://docs.google.com/spreadsheets/d/${ss.getId()}/export?` +
+    `format=pdf&gid=${sheetId}&range=${rangeA1}&size=letter&portrait=true&fitw=true` +
+    `&gridlines=false&printnotes=false&horizontal_alignment=CENTER&vertical_alignment=TOP`;
+
+  const response = UrlFetchApp.fetch(url, {
+    headers: { 'Authorization': 'Bearer ' + ScriptApp.getOAuthToken() }
+  });
+
+  return response.getBlob().setName(filename);
+}
+function toTitleCase_(s) {
+  if (!s) return "";
+  return s.split(/[\s._-]+/).map(w => w ? (w[0].toUpperCase() + w.slice(1).toLowerCase()) : "").join(" ");
+}
+
+function firstNameFromEmail_(email) {
+  if (!email) return "Client";
+  const local = String(email).split("@")[0] || "";
+  // split on separators; pick first token; title-case
+  const guess = local.split(/[._-]+/)[0] || "Client";
+  return toTitleCase_(guess);
+}
+
+
+/**
+ * Finds a folder by name or creates it if it doesn't exist.
+ * @param {string} folderName The name of the folder to find or create.
+ * @return {DriveApp.Folder} The Folder object.
+ */
+function getOrCreateFolder_(folderName) {
+  const folders = DriveApp.getFoldersByName(folderName);
+  if (folders.hasNext()) {
+    return folders.next();
+  } else {
+    return DriveApp.createFolder(folderName);
+  }
+}
+
+/**
+ * Trigger-safe follow-ups (no UI). Use this in time-based triggers.
+ * Reads from 'EntryDatabase' using the header row on ROW 4.
+ */
+function sendDailyFollowUpsTrigger_() {
+  try {
+    const result = processFollowUpsBySerial_(/* force */ false);
+    Logger.log(`sendDailyFollowUpsTrigger_: sent ${result.emailsSent} emails`);
+  } catch (e) {
+    Logger.log("Trigger follow-ups error: " + e.message);
+  }
+}
+
+
+
+function isSameDay_(a, b) {
+  return a && b &&
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate();
+}
+
+/**
+ * Shared core logic for follow-ups.
+ * - Headers at ROW 4, data from ROW 5 down.
+ * - Stamps "Last Follow-Up Sent" in Column T (T5:T) on the SAME ROW as the serial in Column A.
+ * - If force=true, it will send even if already stamped today (and overwrite today's stamp).
+ *   If force=false, it SKIPS rows already stamped today.
+ * Returns { emailsSent }.
+ */
+function processFollowUpsBySerial_(force) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(INVOICE_DB_NAME); // 'EntryDatabase'
+  if (!sheet) throw new Error(`Sheet '${INVOICE_DB_NAME}' not found.`);
+
+  const allValues = sheet.getDataRange().getValues();
+  if (allValues.length < 5) return { emailsSent: 0 };
+
+  const HEADER_ROW = 4;   // row with headers
+  const DATA_START = 5;   // first data row
+  const headers   = allValues[HEADER_ROW - 1];
+  const data      = allValues.slice(DATA_START - 1);
+
+  const nameIndex     = headers.indexOf("Full Name");
+  const businessIndex = headers.indexOf("Business");
+  const campaignIndex = headers.indexOf("Campaign");
+  const amountIndex   = headers.indexOf("Given Amount");
+  const dueDateIndex  = headers.indexOf("Downpayment Due Date");
+  const emailIndex    = headers.indexOf("Email");
+  const serialIndex   = headers.indexOf("Serial No.");
+  const percentIndex  = headers.indexOf("Percentage");
+
+  if ([nameIndex, businessIndex, campaignIndex, amountIndex, dueDateIndex, emailIndex, serialIndex, percentIndex].includes(-1)) {
+    throw new Error("A required column is missing in 'EntryDatabase'. Expected headers: Full Name, Business, Campaign, Given Amount, Downpayment Due Date, Email, Serial No., Percentage.");
+  }
+
+  // Ensure Column T header exists
+  const LAST_SENT_COL_1B = 20; // column T
+  const LAST_SENT_COL_0B = LAST_SENT_COL_1B - 1;
+  if (headers[LAST_SENT_COL_0B] !== "Last Follow-Up Sent") {
+    sheet.getRange(HEADER_ROW, LAST_SENT_COL_1B).setValue("Last Follow-Up Sent");
+  }
+
+  // Read and FORMAT T5:T so timestamps show date+time
+  const tRange  = sheet.getRange(DATA_START, LAST_SENT_COL_1B, data.length, 1);
+  tRange.setNumberFormat("mmm d, yyyy h:mm am/pm");   // << show date + time
+  const tValues = tRange.getValues();                 // [[dateOrEmpty], ...]
+
+  const tz = Session.getScriptTimeZone();
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+
+  let emailsSent = 0;
+
+  data.forEach((row, i) => {
+    const email = row[emailIndex];
+    if (!email) return;
+
+    // Skip if already sent today (unless force)
+    const lastSent = tValues[i][0];
+    if (!force && lastSent instanceof Date && isSameDay_(lastSent, today)) return;
+
+    // Due date
+    const rawDue  = row[dueDateIndex];
+    const dueDate = (rawDue instanceof Date) ? new Date(rawDue) : new Date(rawDue);
+    if (isNaN(dueDate) || dueDate < today) return;
+
+    // Percentage (accepts 0.3, 30, "30%")
+    let pctRaw = row[percentIndex];
+    let pct = (typeof pctRaw === "number") ? pctRaw : parseFloat(String(pctRaw || "").replace("%","").trim());
+    if (isNaN(pct)) return;
+    if (pct > 1) pct = pct / 100;
+    if (pct >= 0.30) return;
+
+    // Amount
+    let amtRaw = row[amountIndex];
+    let amountNum = 0;
+    if (typeof amtRaw === "number") amountNum = amtRaw;
+    else if (amtRaw != null) amountNum = parseFloat(String(amtRaw).replace(/[^\d.-]/g,"")) || 0;
+
+    const clientName   = row[nameIndex];
+    const businessName = row[businessIndex];
+    const campaign     = row[campaignIndex];
+    const serialNo     = row[serialIndex];
+
+    const firstName = (clientName && String(clientName).trim())
+      ? String(clientName).trim().split(/\s+/)[0]
+      : firstNameFromEmail_(email);
+
+    const daysUntilDue = Math.ceil((dueDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+    let subject = "", html = "";
+
+    if (daysUntilDue === 1) {
+      const dp = amountNum * 0.30;
+      const dueStr = Utilities.formatDate(dueDate, tz, "MMMM d, yyyy");
+      subject = `Friendly Reminder: Minimum 30% Down Payment Requirement [Billing Invoice #[${serialNo}]] – Due Tomorrow`;
+      html = `
+        <p>Hi [${clientName || firstName}],</p>
+        <p>I hope this message finds you well.</p>
+        <p>This is a friendly reminder regarding Invoice #[${serialNo}] for your [${campaign || ''}] with RDR Business Solutions, Inc. As per our agreement, a down payment of at least 30% of the total contract price is required to secure your booking and proceed with preparations.</p>
+        <p>You were given three (3) days from the meeting date to settle the down payment, which will end tomorrow, <b>[${dueStr}]</b>.</p>
+        <p><b>Contract Price:</b> [${amountNum.toLocaleString('en-PH', { style: 'currency', currency: 'PHP' })}]</p>
+        <p><b>Minimum 30% Down Payment:</b> [${dp.toLocaleString('en-PH', { style: 'currency', currency: 'PHP' })}]</p>
+        <p><b>Due Date:</b> [${dueStr}]</p>
+        <p>If payment has already been made, please disregard this message.</p>
+        <p><a href="https://YOUR_PAYMENT_LINK_HERE" style="background-color:#007bff; color:white; padding:10px 15px; text-decoration:none; border-radius:5px;">View Payment Options</a></p>
+        <p><b>Proof of Payment Instructions:</b></p>
+        <p>Email your proof of payment to finance@rdrcorporation.com.</p>
+        <p>Use this subject line format:<br><b>[${businessName || clientName || firstName}] – [${campaign || ''}]</b></p>
+        <p>Attach the deposit slip / transfer confirmation and include your invoice number in the email body.</p>
+        <p>Warm regards,<br>
+        Ma. Sophia P. Martinez<br>
+        Collection Officer<br>
+        RDR Business Solutions, Inc.<br>
+        📧 finance@rdrcorporation.com | 📱 0945 559 6470</p>
+      `;
+    } else if (daysUntilDue > 1) {
+      const dueStr = Utilities.formatDate(dueDate, tz, "MMMM d, yyyy");
+      subject = `Gentle Follow-Up for Invoice [${serialNo}]`;
+      html = `
+        <p>Dear ${clientName || firstName},</p>
+        <p>This is a gentle reminder regarding your invoice <b>#${serialNo}</b>.</p>
+        <p>The downpayment of <b>${amountNum.toLocaleString('en-PH', { style: 'currency', currency: 'PHP' })}</b> is due on <b>${dueStr}</b>.</p>
+        <p>If you have already made the payment, please disregard this email. Otherwise, feel free to reply if you have questions.</p>
+        <p>Thank you!</p>
+      `;
+    } else {
+      return;
+    }
+
+    if (subject) {
+      MailApp.sendEmail(email, subject, "", { htmlBody: html });
+      emailsSent++;
+      tValues[i][0] = new Date();  // <-- Date + time
+    }
+  });
+
+  // Bulk write all stamps to T5:T (shows date+time because of number format above)
+  sheet.getRange(DATA_START, LAST_SENT_COL_1B, tValues.length, 1).setValues(tValues);
+  return { emailsSent };
+}
+
+
+// Public wrapper for time-based trigger (safe)
+function sendDailyFollowUpsTrigger() {
+  try {
+    processFollowUpsBySerial_(/* force */ false);
+  } catch (e) {
+    Logger.log("Trigger follow-ups error: " + e.message);
+  }
+}
+
