@@ -56,9 +56,10 @@ function fmtDate_(d) {
  *  - fullName, business, campaign, meetingDate(Date), givenAmount(number),
  *    invoiceSerial, paymentLink, financeEmail, financePhone, officerName, officerTitle, companyName
  */
+// [PASTE THIS ENTIRE BLOCK to replace the broken section]
+
 function buildDownpaymentEmail_({
   fullName, business, campaign, meetingDate, givenAmount, invoiceSerial,
-  // --- FIX: Pull default values from the CONFIG object ---
   paymentLink = CONFIG.PAYMENT_LINK,
   financeEmail = CONFIG.FINANCE_EMAIL,
   financePhone = CONFIG.FINANCE_PHONE,
@@ -102,118 +103,12 @@ function buildDownpaymentEmail_({
   return { subject, html: body };
 }
 
-  // Subject from your spec:
-  const subject = `Down Payment Requirement – Minimum 30% [Billing Invoice #${invoiceSerial}] – Payable Within 3 Days`;
+function toTitleCase_(s) { /* ... your existing function ... */ }
+function toPhp_(val) { /* ... your existing function ... */ }
+// ... keep all your other helper functions ...
 
-  // Payment “button” is a styled anchor
-  const buttonHtml = `<a href="${paymentLink}" style="background-color:#007bff;color:#fff;padding:10px 16px;text-decoration:none;border-radius:6px;display:inline-block;">View Payment Options</a>`;
+function onOpen(e) { /* ... your existing function ... */ }
 
-  const body = `
-  <p>Hi <b>${toTitleCase_(clientNameSafe)}</b>,</p>
-
-  <p>It was a pleasure meeting with you regarding your <b>${campaign || 'engagement'}</b> with <b>${companyName}</b>.</p>
-
-  <p>As discussed and in accordance with our agreement, a down payment of at least <b>30%</b> of the total contract price is required to secure your booking and allow us to begin preparations.</p>
-
-  <p>You are given three (3) calendar days from today, <b>${meetStr}</b>, to settle the required down payment.</p>
-
-  <p><b>Contract Price:</b> <b>${contractPrice}</b><br>
-  <b>Minimum 30% Down Payment:</b> <b>${dp30}</b><br>
-  <b>Due Date:</b> <b>${due3Str}</b></p>
-
-  <p>To ensure that your booking is secured and all necessary arrangements are completed on schedule, we encourage you to settle the down payment within the given period. Please note that failure to remit the required down payment within the 3-day period may result in the expiration of the offer and forfeiture of your booking slot.</p>
-
-  <p>If payment has already been made, please disregard this message.</p>
-
-  <p>To view our payment options and complete your down payment, please click the button below:</p>
-  <p>${buttonHtml}</p>
-
-  <hr>
-  <p><b>Proof of Payment (PoP) Instructions</b><br>
-  Email your proof of payment to <a href="mailto:${financeEmail}"><b>${financeEmail}</b></a>.<br>
-  <em>Use this subject line format:</em><br>
-  <code><b>${(business && String(business).trim()) ? toTitleCase_(business) : toTitleCase_(clientNameSafe)} – ${campaign || 'Project'}</b></code><br>
-  Attach the deposit slip or transfer confirmation and include your invoice number in the email body.</p>
-
-  <p>Should you have any questions or need clarification regarding the payment terms, please feel free to contact us — we’re happy to assist.</p>
-
-  <p>Thank you for your prompt attention to this requirement and for your trust in our services.</p>
-
-  <p>Warm regards,<br>
-  <b>${officerName}</b><br>
-  <b>${officerTitle}</b><br>
-  <b>${companyName}</b><br>
-  📧 <a href="mailto:${financeEmail}"><b>${financeEmail}</b></a> | 📱 <b>${financePhone}</b></p>
-`;
-
-function toTitleCase_(s) {
-  if (!s) return "";
-  return String(s)
-    .split(/[\s._-]+/)
-    .map(w => w ? (w[0].toUpperCase() + w.slice(1).toLowerCase()) : "")
-    .join(" ");
-}
-
-function toPhp_(val) {
-  const n = (typeof val === 'number') ? val : parseFloat(String(val).replace(/[^\d.-]/g,"")) || 0;
-  return n.toLocaleString('en-PH', { style: 'currency', currency: 'PHP' });
-}
-
-function formatFullDateTime_(val) {
-  if (!val || !(val instanceof Date)) return "";
-  return Utilities.formatDate(val, Session.getScriptTimeZone(), "MMMM d, yyyy h:mm a");
-}
-
-function dateOnly_(val) {
-  if (!val || !(val instanceof Date)) return null;
-  const d = new Date(val);
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
-
-function firstNameFromEmail_(email) {
-  if (!email) return "Client";
-  const local = String(email).split("@")[0] || "";
-  const guess = local.split(/[.-_]+/)[0] || "Client";
-  return toTitleCase_(guess);
-}
-
-function safeGetUi_() {
-  try {
-    return SpreadsheetApp.getUi();
-  } catch (_) {
-    return null; // no UI in this context (e.g., time-based trigger / run from editor)
-  }
-}
-
-/**
- * Creates a custom menu in the spreadsheet UI when the file is opened.
- */
-function onOpen(e) {
-  const ui = safeGetUi_();
-  if (!ui) return; // running outside spreadsheet UI; just exit quietly
-
-  ui.createMenu('Sales Tool')
-    .addItem('Encode Invoice Receipt', 'encodeInvoiceReceipt')
-    .addItem('Acknowledgement Receipt Encode', 'encodeAcknowledgementReceipt')
-    .addSeparator()
-    .addItem('Send Daily Follow-Ups', 'sendDailyFollowUps')
-    .addItem('Force Send Follow-Ups (ignore today stamp)', 'sendDailyFollowUpsForce')
-    .addToUi();
-}
-
-
-/**
- * Validates, processes, PDFs, emails, and logs a new invoice receipt.
- */
-/**
- * Validates, processes, PDFs, emails, and logs a new invoice receipt.
- */
-// [REPLACE THIS ENTIRE FUNCTION]
-/**
- * Validates, processes, PDFs, emails, and logs a new invoice receipt.
- * (FULLY REFACTORED TO USE NAMED RANGES)
- */
 function encodeInvoiceReceipt() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const ui = safeGetUi_();
@@ -275,14 +170,6 @@ function encodeInvoiceReceipt() {
   }
 }
 
-
-
-// --- ACKNOWLEDGEMENT RECEIPT (AR) ---
-
-/**
- * Validates, PDFs, emails, saves to Drive, and logs an acknowledgement receipt.
- */
-// [REPLACE THIS ENTIRE FUNCTION]
 function encodeAcknowledgementReceipt() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const ui = safeGetUi_();
