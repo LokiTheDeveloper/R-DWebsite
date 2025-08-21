@@ -143,9 +143,12 @@ function encodeInvoiceReceipt() {
       campaign: 7, amount: 8, dpDue: 9, fpDue: 10, email: 11, serial: 12, timeSent: 13
     };
 
-    const requiredIdx = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11]; // O12-O21 and O23
+    // --- THIS IS THE FIX ---
+    // Add index 12 (serialNo) back to the list of required fields.
+    const requiredIdx = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12];
     for (const i of requiredIdx) {
-      if (values[i][0] === '') throw new Error('Please fill all required fields. Note: Full Payment Due Date (O22) is optional.');
+      // Updated the error message to include O24 again.
+      if (values[i][0] === '') throw new Error('Please fill all required fields (O12-O21, O23-O24). Note: Full Payment Due Date (O22) is optional.');
     }
     
     const entryDate = values[IDX.date][0];
@@ -164,7 +167,7 @@ function encodeInvoiceReceipt() {
     const timeSent = new Date();
     const amountNum = (typeof amountRaw === 'number') ? amountRaw : parseFloat(String(amountRaw).replace(/[^\d.-]/g, '')) || 0;
 
-    const pdfBlob = exportSheetRangeToPdf_(CONFIG.SHEET_NAMES.INVOICE_ENCODER, CONFIG.NAMED_RANGES.INVOICE_PDF, `Invoice-${serialNo || 'NA'}.pdf`);
+    const pdfBlob = exportSheetRangeToPdf_(CONFIG.SHEET_NAMES.INVOICE_ENCODER, CONFIG.NAMED_RANGES.INVOICE_PDF, `Invoice-${serialNo}.pdf`);
 
     const { subject: dpSubject, html: dpHtml } = buildDownpaymentEmail_({
       fullName: clientName, business: business, campaign: campaign, meetingDate: entryDate,
@@ -174,17 +177,14 @@ function encodeInvoiceReceipt() {
     MailApp.sendEmail({ to: clientEmail, subject: dpSubject, htmlBody: dpHtml, attachments: [pdfBlob] });
 
     // --- SMART DATA TRANSFER (WITH ROW 5 GUARANTEE) ---
-    // 1. Find the first empty row, ensuring it's never higher than row 5
     const lastDataRow = dbSheet.getRange('A:A').getValues().filter(String).length;
     const firstEmptyRow = Math.max(5, lastDataRow + 1);
 
-    // 2. Prepare the data for the 14 columns (A to N)
     const newRowData = [[
       serialNo, entryDate, campaign, clientName, tin, business, address,
       city, zip, clientEmail, timeSent, amountNum, dpDueDate, fpDueDate
     ]];
 
-    // 3. Write data ONLY to columns A through N for that specific row.
     dbSheet.getRange(firstEmptyRow, 1, 1, 14).setValues(newRowData);
 
     const clearRange = ss.getRangeByName(CONFIG.NAMED_RANGES.INVOICE_CLEAR);
