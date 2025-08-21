@@ -402,11 +402,23 @@ function isSameDay_(a, b) {
 function sendDailyFollowUps() {
   const ui = SpreadsheetApp.getUi();
   try {
-    const result = processFollowUpsBySerial_(false);
-    ui.alert('Follow-Ups Complete', `${result.emailsSent} follow-up emails have been sent.`, ui.ButtonSet.OK);
+    const dpResult = processFollowUpsBySerial_(false);
+    const fpResult = processFullPaymentFollowUps_(false);
+    const totalEmails = dpResult.emailsSent + fpResult.emailsSent;
+    ui.alert('Follow-Ups Complete', `${totalEmails} follow-up emails have been sent.\n\nDown Payments: ${dpResult.emailsSent}\nFull Payments: ${fpResult.emailsSent}`, ui.ButtonSet.OK);
   } catch (e) {
     Logger.log(e);
     ui.alert('An Error Occurred', e.message, ui.ButtonSet.OK);
+  }
+}
+
+--- BEFORE (sendDailyFollowUpsTrigger)
+function sendDailyFollowUpsTrigger() {
+  try {
+    const result = processFollowUpsBySerial_(false);
+    Logger.log(`sendDailyFollowUpsTrigger: sent ${result.emailsSent} emails`);
+  } catch (e) {
+    Logger.log("Trigger follow-ups error: " + e.message);
   }
 }
 
@@ -429,8 +441,10 @@ function sendDailyFollowUpsForce() {
  */
 function sendDailyFollowUpsTrigger() {
   try {
-    const result = processFollowUpsBySerial_(false);
-    Logger.log(`sendDailyFollowUpsTrigger: sent ${result.emailsSent} emails`);
+    const dpResult = processFollowUpsBySerial_(false);
+    const fpResult = processFullPaymentFollowUps_(false);
+    const totalEmails = dpResult.emailsSent + fpResult.emailsSent;
+    Logger.log(`Daily Follow-Ups Trigger Complete. Total Sent: ${totalEmails} (DP: ${dpResult.emailsSent}, FP: ${fpResult.emailsSent}). Statuses Updated: ${fpResult.updatedStatuses}.`);
   } catch (e) {
     Logger.log("Trigger follow-ups error: " + e.message);
   }
@@ -615,6 +629,217 @@ function processFollowUpsBySerial_(force) {
   return { emailsSent };
 }
 
+// --- FULL PAYMENT FOLLOW-UPS ---
+// [PASTE THIS ENTIRE BLOCK INTO YOUR SCRIPT]
+
+/**
+ * Main logic for sending full payment follow-ups. Reads from EntryDatabase.
+ * Checks Fullpayment Due Date, Receivables, and Status.
+ * @param {boolean} force - If true, ignores today's sent stamp.
+ * @returns {{emailsSent: number, updatedStatuses: number}}
+ */
+function processFullPaymentFollowUps_(force = false) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(INVOICE_DB_NAME); // 'EntryDatabase'
+  if (!sheet) throw new Error(`Sheet '${INVOICE_DB_NAME}' not found.`);
+
+  const dataRange = sheet.getRange('A5:T' + sheet.getLastRow());
+  if (dataRange.getNumRows() < 1) return { emailsSent: 0, updatedStatuses: 0 };
+
+  const values = dataRange.getValues();
+  const tz = Session.getScriptTimeZone();
+  const today = dateOnly_(new Date());
+
+  let emailsSent = 0;
+  let updatedStatuses = 0;
+
+  // Header map (0-based for range A:T)
+  const H = {
+    serial: 0, campaign: 2, name: 3, business: 5, email: 9,
+    givenAmount: 11, fpDueDate: 13, repayment: 15, receivables: 17,
+    status: 18, lastFollowUp: 19
+  };
+
+  values.forEach((row, i) => {
+    try {
+      // --- Initial Validation & Checks ---
+      const status = String(row[H.status] || '').toUpperCase().trim();
+      const receivables = (typeof row[H.receivables] === 'number') ? row[H.receivables] : 0;
+      const fpDueDate = row[H.fpDueDate];
+
+      // Skip if paid, cancelled, has no due date, or no remaining balance
+      if (status === 'PAID' || status === 'CANCELLED' || status === 'FORFEITED' || !(fpDueDate instanceof Date) || receivables <= 0) {
+        return;
+      }
+
+      // Skip if already sent today (unless forced)
+      const lastSent = row[H.lastFollowUp];
+      if (!force && lastSent instanceof Date && isSameDay_(lastSent, new Date())) {
+        return;
+      }
+
+      // --- Calculate Date Logic ---
+      const dueOnly = dateOnly_(fpDueDate);
+      const daysOverdue = Math.ceil((today.getTime() - dueOnly.getTime()) / (1000 * 60 * 60 * 24));
+
+      // --- Prepare Email Data ---
+      const emailData = {
+        clientName: toTitleCase_(row[H.name] || row[H.business] || firstNameFromEmail_(row[H.email])),
+        serialNo: row[H.serial],
+        campaign: row[H.campaign] || 'engagement',
+        businessName: toTitleCase_(row[H.business] || row[H.name]),
+        dueDateStr: fmtDate_(dueOnly),
+        receivablesStr: toPhp_(receivables),
+        contractPriceStr: toPhp_(row[H.givenAmount]),
+        todayStr: fmtDate_(today),
+      };
+
+      let email;
+
+      // --- Determine Which Email to Send ---
+      if (daysOverdue === -1) { // 1 Day Before Due
+        email = buildFpReminderEmail_(emailData);
+      } else if (daysOverdue === 0) { // Due Today
+        email = buildFpDueTodayEmail_(emailData);
+      } else if (daysOverdue >= 1 && daysOverdue <= 5) { // 1-5 Days Overdue
+        emailData.daysPastDue = daysOverdue;
+        email = buildFpOverdueEmail_(emailData);
+      } else if (daysOverdue >= 6 && daysOverdue <= 7) { // 6-7 Days Overdue (Urgent)
+        emailData.daysPastDue = daysOverdue;
+        emailData.penaltyAmountStr = toPhp_(row[H.givenAmount] * 0.30);
+        emailData.newTotalStr = toPhp_(receivables + (row[H.givenAmount] * 0.30));
+        email = buildFpUrgentEmail_(emailData);
+      } else if (daysOverdue >= 8) { // 8+ Days Overdue (Forfeiture)
+        email = buildFpForfeitureEmail_(emailData);
+        // Action: Update status in the sheet data
+        values[i][H.status] = 'FORFEITED';
+        updatedStatuses++;
+      }
+
+      // --- Send Email and Stamp ---
+      if (email) {
+        const clientEmail = String(row[H.email] || '').split(/[;,]/)[0].trim();
+        if (clientEmail) {
+          MailApp.sendEmail({ to: clientEmail, subject: email.subject, htmlBody: email.html });
+          values[i][H.lastFollowUp] = new Date(); // Stamp column T
+          emailsSent++;
+        }
+      }
+
+    } catch (e) {
+      Logger.log(`Error processing row ${i + 5} (Serial: ${row[H.serial]}): ${e.message}`);
+    }
+  });
+
+  // --- Write all updates back to the sheet in one call ---
+  if (emailsSent > 0 || updatedStatuses > 0) {
+    dataRange.setValues(values);
+  }
+
+  return { emailsSent, updatedStatuses };
+}
+
+
+// --- FULL PAYMENT EMAIL BUILDER HELPERS ---
+
+function buildFpReminderEmail_({ clientName, serialNo, campaign, receivablesStr, dueDateStr }) {
+  const subject = `Friendly Reminder: [Billing Invoice #${serialNo}] – Due Tomorrow`;
+  const html = `
+    <p>Hi ${clientName},</p>
+    <p>I hope you’re doing well. This is a friendly reminder regarding Invoice #${serialNo} for your <b>${campaign}</b> engagement with ${COMPANY_NAME}. Our records indicate a remaining balance of <b>${receivablesStr}</b>, which is due tomorrow, <b>${dueDateStr}</b>.</p>
+    <p>To ensure a smooth process and avoid any late fees or service interruptions, we encourage arranging settlement within the due date.</p>
+    ${SHARED_EMAIL_COMPONENTS.paymentMadeIgnore}
+    ${SHARED_EMAIL_COMPONENTS.paymentButton}
+    ${SHARED_EMAIL_COMPONENTS.popInstructions(clientName, campaign, serialNo)}
+    <p>If you have any questions or require assistance with the payment process, please don’t hesitate to reach out — we’re happy to assist.</p>
+    <p>Thank you for your prompt attention to this matter and for your continued partnership.</p>
+    ${SHARED_EMAIL_COMPONENTS.signature}`;
+  return { subject, html };
+}
+
+function buildFpDueTodayEmail_({ clientName, serialNo, campaign, receivablesStr }) {
+  const subject = `Gentle Reminder: [Billing Invoice #${serialNo}] Due Today (until 5:00 PM)`;
+  const html = `
+    <p>Hi ${clientName},</p>
+    <p>Hope you’re doing well. Just a gentle check‑in on Invoice #${serialNo} for your <b>${campaign}</b> with ${COMPANY_NAME}. Our records show a remaining balance of <b>${receivablesStr}</b> that’s due today. When convenient, kindly settle on or before <b>5:00 PM</b>.</p>
+    ${SHARED_EMAIL_COMPONENTS.paymentMadeIgnore}
+    ${SHARED_EMAIL_COMPONENTS.paymentButton}
+    ${SHARED_EMAIL_COMPONENTS.popInstructions(clientName, campaign, serialNo)}
+    <p>If you have any questions or need clarification, please don’t hesitate to reach out to us—we’re happy to assist.</p>
+    <p>Thank you for your continued partnership and for taking a moment to review this.</p>
+    ${SHARED_EMAIL_COMPONENTS.signature}`;
+  return { subject, html };
+}
+
+function buildFpOverdueEmail_({ clientName, serialNo, campaign, receivablesStr, dueDateStr, daysPastDue }) {
+  const subject = `Gentle Reminder: [Billing Invoice #${serialNo}] – Payment ${daysPastDue} Day${daysPastDue > 1 ? 's' : ''} Past Due`;
+  const html = `
+    <p>Hi ${clientName},</p>
+    <p>Hope you’re doing well. This is a gentle follow-up regarding Invoice #${serialNo} for your <b>${campaign}</b> with ${COMPANY_NAME}. Our records show an outstanding balance of <b>${receivablesStr}</b>, originally due on <b>${dueDateStr}</b>, which is now <b>${daysPastDue} day${daysPastDue > 1 ? 's' : ''} past due</b>.</p>
+    <p>We completely understand that schedules can get busy and payment dates may sometimes be overlooked. To help avoid any late fees or possible service interruptions, we would greatly appreciate it if you could arrange settlement at your earliest convenience.</p>
+    ${SHARED_EMAIL_COMPONENTS.paymentMadeIgnore}
+    ${SHARED_EMAIL_COMPONENTS.paymentButton}
+    ${SHARED_EMAIL_COMPONENTS.popInstructions(clientName, campaign, serialNo)}
+    <p>If you have any questions or need assistance with the payment process, please don’t hesitate to reach out to us—we’re happy to assist.</p>
+    <p>Thank you for your attention to this matter and for your continued partnership.</p>
+    ${SHARED_EMAIL_COMPONENTS.signature}`;
+  return { subject, html };
+}
+
+function buildFpUrgentEmail_({ clientName, serialNo, campaign, dueDateStr, daysPastDue, penaltyAmountStr, newTotalStr }) {
+  const subject = `Urgent Reminder: [Billing Invoice #${serialNo}] – Past Due with Penalty Applied`;
+  const html = `
+    <p>Hi ${clientName},</p>
+    <p>I hope this message finds you well.</p>
+    <p>This is an urgent follow-up regarding Invoice #${serialNo} for your <b>${campaign}</b> engagement with ${COMPANY_NAME}. Our records show that the payment is now <b>${daysPastDue} days past due</b> from the agreed due date of <b>${dueDateStr}</b>.</p>
+    <p>Due to ${daysPastDue} days overdue, the total late payment penalty has increased to thirty percent (30%) of the total contract price in accordance with our payment agreement. The outstanding balance should be settled immediately to avoid further charges and potential service interruption.</p>
+    <p><b>Original Contract Price:</b> ${penaltyAmountStr}<br>
+    <b>Total of 30% Late Payment Penalty:</b> ${penaltyAmountStr}<br>
+    <b>Updated Amount Due:</b> ${newTotalStr}</p>
+    ${SHARED_EMAIL_COMPONENTS.paymentMadeIgnore}
+    ${SHARED_EMAIL_COMPONENTS.paymentButton}
+    ${SHARED_EMAIL_COMPONENTS.popInstructions(clientName, campaign, serialNo)}
+    <p>Should you need clarification on the updated amount or assistance in processing the payment, please do not hesitate to reach out — we’re here to assist you.</p>
+    <p>Thank you for your immediate attention to this matter.</p>
+    ${SHARED_EMAIL_COMPONENTS.signature}`;
+  return { subject, html };
+}
+
+function buildFpForfeitureEmail_({ clientName, serialNo, campaign, dueDateStr, receivablesStr, contractPriceStr, todayStr }) {
+  const subject = `Final Notice: [Billing Invoice #${serialNo}] – Forfeiture of Contract & Payment`;
+  const html = `
+    <p>Hi ${clientName},</p>
+    <p>I hope this message finds you well.</p>
+    <p>This is a formal and final notice regarding Invoice #${serialNo} for your <b>${campaign}</b> engagement with ${COMPANY_NAME}. Our records show that no payment has been made for the past seven (7) days from the agreed due date of <b>${dueDateStr}</b>.</p>
+    <p>In accordance with our official Payment Terms & Conditions, the non-settlement of your outstanding balance within the prescribed period has resulted in the automatic forfeiture of your payment and all services under the contract effective today. This forfeiture is final, non-reversible, and without refund.</p>
+    <p><b>Original Contract Price:</b> ${contractPriceStr}<br>
+    <b>Outstanding Balance:</b> ${receivablesStr}<br>
+    <b>Status:</b> Forfeited as of ${todayStr}</p>
+    <p>All services covered by this contract are hereby terminated, and no further reinstatement or grace period will be granted.</p>
+    <p>If you believe this notice has reached you in error, kindly contact us immediately at ${FINANCE_EMAIL}. Otherwise, please be advised that this matter is now considered closed.</p>
+    <p>We thank you for your prior engagement with ${COMPANY_NAME}.</p>
+    ${SHARED_EMAIL_COMPONENTS.signature}`;
+  return { subject, html };
+}
+
+// Helper object for shared email text to avoid repetition
+const SHARED_EMAIL_COMPONENTS = {
+  paymentButton: `<p><a href="${PAYMENT_LINK}" style="background-color:#007bff; color:#fff; padding:10px 16px; text-decoration:none; border-radius:6px; display:inline-block;">View Payment Options</a></p>`,
+  paymentMadeIgnore: `<p>If payment has already been made, please disregard this message.</p>`,
+  popInstructions: (clientName, campaign, serialNo) => `
+    <hr>
+    <p><b>Proof of Payment (PoP) Instructions</b><br>
+    Email your proof of payment to <a href="mailto:${FINANCE_EMAIL}">${FINANCE_EMAIL}</a>.<br>
+    <em>Use this subject line format:</em><br>
+    <code><b>${clientName} – ${campaign || 'Project'}</b></code><br>
+    Attach the deposit slip or transfer confirmation and include your Invoice <b>#${serialNo}</b> in the email body.</p>`,
+  signature: `
+    <p>Warm regards,<br>
+    <b>${COLLECTIONS_OFFICER_NAME}</b><br>
+    ${COLLECTIONS_OFFICER_TITLE}<br>
+    ${COMPANY_NAME}<br>
+    📧 <a href="mailto:${FINANCE_EMAIL}">${FINANCE_EMAIL}</a> | 📱 ${FINANCE_PHONE}</p>`
+};
 
 // --- PDF UTILS ---
 
