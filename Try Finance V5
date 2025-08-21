@@ -126,30 +126,56 @@ function buildDownpaymentEmail_({
   return { subject, html: body };
 }
 
-// [REPLACE your existing encodeInvoiceReceipt function with this]
 function encodeInvoiceReceipt() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const ui = safeGetUi_();
   try {
     const sheet = ss.getSheetByName(CONFIG.SHEET_NAMES.INVOICE_ENCODER);
     const dbSheet = ss.getSheetByName(CONFIG.SHEET_NAMES.DATABASE);
-    // ... [Data reading and validation logic remains the same] ...
-    const values = ss.getRangeByName(CONFIG.NAMED_RANGES.INVOICE_DATA).getValues();
-    const IDX = { /* ... */ };
+
+    const dataRange = ss.getRangeByName(CONFIG.NAMED_RANGES.INVOICE_DATA);
+    if (!dataRange) throw new Error(`Named Range "${CONFIG.NAMED_RANGES.INVOICE_DATA}" not found.`);
+    const values = dataRange.getValues();
+
+    const IDX = {
+      date: 0, tin: 1, fullName: 2, business: 3, address: 4, city: 5, zip: 6,
+      campaign: 7, amount: 8, dpDue: 9, fpDue: 10, email: 11, serial: 12, timeSent: 13
+    };
+
     const requiredIdx = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12];
     for (const i of requiredIdx) {
       if (values[i][0] === '') throw new Error('Please fill all required fields (O12-O21, O23-O24). Note: Full Payment Due Date (O22) is optional.');
     }
-    const { serialNo, entryDate, campaign, clientName, tin, business, address, city, zip, clientEmail, timeSent, amountNum, dpDueDate, fpDueDate } = extractInvoiceData_(values);
     
-    // ... [PDF and Email logic remains the same] ...
+    const entryDate = values[IDX.date][0];
+    const tin = values[IDX.tin][0];
+    const clientName = values[IDX.fullName][0];
+    const business = values[IDX.business][0];
+    const address = values[IDX.address][0];
+    const city = values[IDX.city][0];
+    const zip = values[IDX.zip][0];
+    const campaign = values[IDX.campaign][0];
+    const amountRaw = values[IDX.amount][0];
+    const dpDueDate = values[IDX.dpDue][0];
+    const fpDueDate = values[IDX.fpDue][0];
+    const clientEmail = values[IDX.email][0];
+    const serialNo = values[IDX.serial][0];
+    const timeSent = new Date();
+    const amountNum = (typeof amountRaw === 'number') ? amountRaw : parseFloat(String(amountRaw).replace(/[^\d.-]/g, '')) || 0;
+
     const pdfBlob = exportSheetRangeToPdf_(CONFIG.SHEET_NAMES.INVOICE_ENCODER, CONFIG.NAMED_RANGES.INVOICE_PDF, `Invoice-${serialNo}.pdf`);
-    const { subject: dpSubject, html: dpHtml } = buildDownpaymentEmail_({ /* ... */ });
+
+    const { subject: dpSubject, html: dpHtml } = buildDownpaymentEmail_({
+      fullName: clientName, business: business, campaign: campaign, meetingDate: entryDate,
+      givenAmount: amountNum, invoiceSerial: serialNo,
+    });
+
     MailApp.sendEmail({ to: clientEmail, subject: dpSubject, htmlBody: dpHtml, attachments: [pdfBlob] });
 
-    // --- YOUR NEW ROBUST DATA TRANSFER LOGIC ---
+    // --- SMART DATA TRANSFER (robust, bottom-scan on A5:A, with collision guard) ---
     const MIN_ROW = 5;
     const aCol = dbSheet.getRange(MIN_ROW, 1, dbSheet.getMaxRows() - (MIN_ROW - 1), 1).getValues();
+
     let lastNonEmptyOffset = -1;
     for (let i = aCol.length - 1; i >= 0; i--) {
       if (aCol[i][0] !== "" && aCol[i][0] !== null) {
@@ -157,20 +183,25 @@ function encodeInvoiceReceipt() {
         break;
       }
     }
+
     let firstEmptyRow = (lastNonEmptyOffset === -1) ? MIN_ROW : (MIN_ROW + lastNonEmptyOffset + 1);
+
     const newRowData = [[
       serialNo, entryDate, campaign, clientName, tin, business, address,
       city, zip, clientEmail, timeSent, amountNum, dpDueDate, fpDueDate
     ]];
+
     const targetCell = dbSheet.getRange(firstEmptyRow, 1).getValue();
     if (targetCell !== "" && targetCell !== null) {
       firstEmptyRow++;
     }
+
     dbSheet.getRange(firstEmptyRow, 1, 1, 14).setValues(newRowData);
     // --- END OF NEW LOGIC ---
 
     const clearRange = ss.getRangeByName(CONFIG.NAMED_RANGES.INVOICE_CLEAR);
     if (clearRange) clearRange.clearContent();
+    
     ss.toast('Invoice receipt processed and sent successfully!', 'Success', 5);
   } catch (e) {
     Logger.log(`Error in encodeInvoiceReceipt: ${e.message}`);
