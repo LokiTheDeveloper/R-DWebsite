@@ -412,16 +412,6 @@ function sendDailyFollowUps() {
   }
 }
 
---- BEFORE (sendDailyFollowUpsTrigger)
-function sendDailyFollowUpsTrigger() {
-  try {
-    const result = processFollowUpsBySerial_(false);
-    Logger.log(`sendDailyFollowUpsTrigger: sent ${result.emailsSent} emails`);
-  } catch (e) {
-    Logger.log("Trigger follow-ups error: " + e.message);
-  }
-}
-
 function sendDailyFollowUpsForce() {
   const ui = safeGetUi_(); // may be null outside UI
   try {
@@ -656,8 +646,8 @@ function processFullPaymentFollowUps_(force = false) {
   // Header map (0-based for range A:T)
   const H = {
     serial: 0, campaign: 2, name: 3, business: 5, email: 9,
-    givenAmount: 11, fpDueDate: 13, repayment: 15, receivables: 17,
-    status: 18, lastFollowUp: 19
+    givenAmount: 11, fpDueDate: 13, percentage: 14, repayment: 15,
+    receivables: 17, status: 18, lastFollowUp: 19
   };
 
   values.forEach((row, i) => {
@@ -666,6 +656,17 @@ function processFullPaymentFollowUps_(force = false) {
       const status = String(row[H.status] || '').toUpperCase().trim();
       const receivables = (typeof row[H.receivables] === 'number') ? row[H.receivables] : 0;
       const fpDueDate = row[H.fpDueDate];
+
+      // --- NEW: Check if Down Payment is at least 30% ---
+      let pctRaw = row[H.percentage];
+      let pct = (typeof pctRaw === 'number') ? pctRaw : parseFloat(String(pctRaw || "0").replace("%","").trim());
+      if (isNaN(pct)) pct = 0;
+      if (pct > 1) pct = pct / 100; // Normalize if it's "30" instead of "0.3"
+
+      // If less than 30% DP is paid, skip. Let the DP follow-up handle it.
+      if (pct < 0.30) {
+        return;
+      }
 
       // Skip if paid, cancelled, has no due date, or no remaining balance
       if (status === 'PAID' || status === 'CANCELLED' || status === 'FORFEITED' || !(fpDueDate instanceof Date) || receivables <= 0) {
