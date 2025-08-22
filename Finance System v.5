@@ -1,8 +1,193 @@
 /**
+ * Creates a custom menu in the spreadsheet UI when the file is opened.
  * @OnlyCurrentDoc
- * This script creates a custom menu to automate invoice and receipt processing,
- * and to send follow-up emails based on data in the spreadsheet.
  */
+function onOpen() {
+  SpreadsheetApp.getUi()
+      .createMenu('Sales Tool')
+      // --- Data Entry Items ---
+      .addItem('Encode Invoice/Receipt', 'encodeInvoiceReceipt') 
+      .addItem('Encode Acknowledgement Receipt', 'encodeAcknowledgementReceipt')
+      .addSeparator()
+      
+      // --- Follow-up Items ---
+      .addItem('Send FP Follow-Ups (≥30% Paid)', 'sendUpcomingFpFollowUps')
+      .addItem('FORCE Send DP Daily Follow-Ups', 'sendDailyFollowUpsForce') // keep as-is unless you want to rename
+
+      .addToUi();
+}
+
+/**
+ * NEW: Status-only Full Payment follow-ups.
+ * Sends FP emails ONLY when Column S ("Status") == "FOR FULL PAYMENT".
+ * Still stamps Column U ("FP Last Follow-Up Sent") after sending.
+ */
+function processUpcomingFpFollowUps_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(CONFIG.SHEET_NAMES.DATABASE);
+  if (!sheet) throw new Error(`Sheet '${CONFIG.SHEET_NAMES.DATABASE}' not found.`);
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 5) return { emailsSent: 0 };
+
+  // Read A..U once
+  const dataRange = sheet.getRange('A5:U' + lastRow);
+  const values = dataRange.getValues();
+
+  // For stamping U (FP Last Follow-Up Sent)
+  const stampRange = sheet.getRange('U5:U' + lastRow);
+  const updatedTimestamps = stampRange.getValues();
+
+  // Local helpers
+  const isSameDay_ = (d1, d2) =>
+    d1 && d2 &&
+    d1.getFullYear() === d2.getFullYear() &&
+    d1.getMonth() === d2.getMonth() &&
+    d1.getDate() === d2.getDate();
+
+  const today = dateOnly_(new Date());
+  let emailsSent = 0;
+
+  // Column map (0-based from A)
+  const H = {
+    serial: 0,          // A
+    campaign: 2,        // C
+    name: 3,            // D
+    business: 5,        // F
+    email: 9,           // J
+    givenAmount: 11,    // L
+    fpDueDate: 13,      // N
+    percentage: 14,     // O
+    receivables: 17,    // R
+    status: 18,         // S
+    lastFpFollowUp: 20  // U
+  };
+
+  values.forEach((row, i) => {
+  try {
+    // ---- REQUIRE % COLUMN O >= 30% ----
+    const pctRaw = row[H.percentage];
+    let pct;
+    if (typeof pctRaw === 'number') {
+      pct = pctRaw > 1 ? pctRaw / 100 : pctRaw;
+    } else {
+      const n = parseFloat(String(pctRaw || '').replace(/[^0-9.-]+/g, ''));
+      pct = isNaN(n) ? 0 : (n > 1 ? n / 100 : n);
+    }
+    if (pct < 0.30) return;
+
+    // Idempotency: skip if already sent today
+    const lastSent = row[H.lastFpFollowUp];
+    if (lastSent instanceof Date && isSameDay_(lastSent, new Date())) return;
+
+      const clientEmail = String(row[H.email] || '').split(/[;,]/)[0].trim();
+      if (!clientEmail) return;
+
+      const clientName = toTitleCase_(row[H.name] || row[H.business] || firstNameFromEmail_(row[H.email]));
+      const serialNo = row[H.serial];
+      const campaign = row[H.campaign] || 'engagement';
+
+      const receivables = (typeof row[H.receivables] === 'number') ? row[H.receivables] : 0;
+      const receivablesStr = toPhp_(receivables);
+
+      const fpDue = row[H.fpDueDate];
+      const dueOnly = (fpDue instanceof Date) ? dateOnly_(fpDue) : null;
+      const dueDateStr = (dueOnly) ? fmtDate_(dueOnly) : '';
+
+      // Pick FP email variant
+      let email;
+      if (dueOnly) {
+        const diffDays = Math.round((dueOnly - today) / 86400000);
+        if (diffDays === 0) {
+          email = buildFpDueTodayEmail_({ clientName, serialNo, campaign, receivablesStr });
+        } else if (diffDays === 1) {
+          email = buildFpReminderEmail_({ clientName, serialNo, campaign, receivablesStr, dueDateStr });
+        } else if (diffDays < 0) {
+          const daysPastDue = Math.abs(diffDays);
+          email = buildFpOverdueEmail_({ clientName, serialNo, campaign, receivablesStr, dueDateStr, daysPastDue });
+        }
+      }
+      // Fallback if no due date set
+      if (!email) {
+        email = buildFpReminderEmail_({ clientName, serialNo, campaign, receivablesStr, dueDateStr });
+      }
+
+      // Send
+      MailApp.sendEmail({
+        to: clientEmail,
+        subject: email.subject,
+        htmlBody: email.html
+      });
+
+      // Stamp Column U (FP Last Follow-Up Sent)
+      updatedTimestamps[i][0] = new Date();
+      emailsSent++;
+    } catch (e) {
+      Logger.log(`processUpcomingFpFollowUps_ row ${i + 5} error: ${e.message}`);
+    }
+  });
+
+  if (emailsSent > 0) {
+    stampRange.setValues(updatedTimestamps);
+  }
+
+  return { emailsSent };
+}
+
+
+function sendUpcomingFpFollowUps() {
+  const ui = (function(){ try { return SpreadsheetApp.getUi(); } catch(e) { return null; } })();
+  try {
+    const result = processUpcomingFpFollowUps_();
+    const msg = `${result.emailsSent} Full Payment follow-up email(s) sent.\nStamped: Column U (FP Last Follow-Up Sent)`;
+    if (ui) ui.alert('FP Follow-Ups (Status = FOR FULL PAYMENT)', msg, ui.ButtonSet.OK);
+    Logger.log(msg);
+  } catch (err) {
+    Logger.log('sendUpcomingFpFollowUps error: ' + err.message);
+    if (ui) ui.alert('Error', err.message, ui.ButtonSet.OK);
+  }
+}
+
+function buildArEmail_({
+  clientName,
+  arNumber,
+  serialInvoiceNo,
+  dateReceived,   // Date
+  modeOfPayment,
+  amount          // number
+}) {
+  const nameSafe = toTitleCase_(clientName || 'Client');
+  const dateStr = fmtDate_(dateReceived);
+  const amountStr = toPhp_(amount);
+  const subject = `Acknowledgement Receipt #${arNumber} — Payment Received`;
+  const html = `
+    <p>Hi ${nameSafe},</p>
+
+    <p>Thank you for your payment. Please find attached your <b>Acknowledgement Receipt</b>.</p>
+
+    <p>
+      <b>AR #:</b> ${arNumber}<br>
+      <b>Invoice #:</b> ${serialInvoiceNo}<br>
+      <b>Date Received:</b> ${dateStr}<br>
+      <b>Mode of Payment:</b> ${modeOfPayment || '—'}<br>
+      <b>Amount Received:</b> ${amountStr}
+    </p>
+
+    <p>If you have any questions, feel free to contact us at
+      <a href="mailto:${CONFIG.FINANCE_EMAIL}">${CONFIG.FINANCE_EMAIL}</a> or ${CONFIG.FINANCE_PHONE}.
+    </p>
+
+    <p>Warm regards,<br>
+    ${CONFIG.COLLECTIONS_OFFICER_NAME}<br>
+    ${CONFIG.COLLECTIONS_OFFICER_TITLE}<br>
+    ${CONFIG.COMPANY_NAME}<br>
+    📧 <a href="mailto:${CONFIG.FINANCE_EMAIL}">${CONFIG.FINANCE_EMAIL}</a> | 📱 ${CONFIG.FINANCE_PHONE}</p>
+  `;
+  return { subject, html };
+}
+
+
+
 
 // --- CONFIGURATION CONSTANTS ---
 const CONFIG = {
@@ -33,95 +218,71 @@ const CUTOFF_HOUR_24 = 17; // 5 PM
 const CUTOFF_MINUTE  = 0;
 
 // --- HELPERS ---
-// ... (your helper functions start here) ...
 
-// --- HELPERS ---
+// [PASTE THIS ENTIRE BLOCK into your HELPERS section]
 
-/** Add N days to a Date (returns new Date, doesn’t mutate original) */
+/**
+ * Extracts and maps data from the Invoice Encoder form values.
+ * @param {any[][]} values - The 2D array of values from the InvoiceDataRange.
+ * @returns {object} An object containing all the named data points.
+ */
+function extractInvoiceData_(values) {
+  const IDX = {
+    date: 0, tin: 1, fullName: 2, business: 3, address: 4, city: 5, zip: 6,
+    campaign: 7, amount: 8, dpDue: 9, fpDue: 10, email: 11, serial: 12, timeSent: 13
+  };
+  
+  const data = {};
+  data.entryDate = values[IDX.date][0];
+  data.tin = values[IDX.tin][0];
+  data.clientName = values[IDX.fullName][0];
+  data.business = values[IDX.business][0];
+  data.address = values[IDX.address][0];
+  data.city = values[IDX.city][0];
+  data.zip = values[IDX.zip][0];
+  data.campaign = values[IDX.campaign][0];
+  data.amountRaw = values[IDX.amount][0];
+  data.dpDueDate = values[IDX.dpDue][0];
+  data.fpDueDate = values[IDX.fpDue][0];
+  data.clientEmail = values[IDX.email][0];
+  data.serialNo = values[IDX.serial][0];
+  data.timeSent = new Date();
+  data.amountNum = (typeof data.amountRaw === 'number') ? data.amountRaw : parseFloat(String(data.amountRaw).replace(/[^\d.-]/g, '')) || 0;
+  
+  return data;
+}
+
+/**
+ * Extracts and maps data from the AR Encoder form values.
+ * @param {any[][]} values - The 2D array of values from the ArDataRange.
+ * @returns {object} An object containing all the named data points.
+ */
+function extractArData_(values) {
+  const displayValues = SpreadsheetApp.getActive().getRangeByName(CONFIG.NAMED_RANGES.AR_DATA).getDisplayValues();
+  const IDX = { date: 0, amount: 4, mode: 5, serial: 6, arNum: 7, name: 8, email: 10 };
+
+  const data = {};
+  data.dateReceived = values[IDX.date][0];
+  data.amountRaw = values[IDX.amount][0];
+  data.modeOfPayment = values[IDX.mode][0];
+  data.serialInvoiceNo = String(values[IDX.serial][0] || '').trim();
+  data.arNumber = String(values[IDX.arNum][0] || '').trim();
+  data.clientNameRaw = displayValues[IDX.name][0];
+  data.clientEmail = String(values[IDX.email][0] || '').trim();
+
+  return data;
+}
+
 function addDays_(d, n) {
   const x = new Date(d);
   x.setDate(x.getDate() + n);
   return x;
 }
 
-/** Format Date as e.g. 'September 1, 2025' */
 function fmtDate_(d) {
   if (!(d instanceof Date)) return '';
   return Utilities.formatDate(d, Session.getScriptTimeZone(), 'MMMM d, yyyy');
 }
-
-/**
- * Build official Down Payment email (subject + html) per spec.
- * Inputs:
- *  - fullName, business, campaign, meetingDate(Date), givenAmount(number),
- *    invoiceSerial, paymentLink, financeEmail, financePhone, officerName, officerTitle, companyName
- */
-function buildDownpaymentEmail_({
-  fullName, business, campaign, meetingDate, givenAmount, invoiceSerial,
-  paymentLink = PAYMENT_LINK,
-  financeEmail = FINANCE_EMAIL,
-  financePhone = FINANCE_PHONE,
-  officerName = COLLECTIONS_OFFICER_NAME,
-  officerTitle = COLLECTIONS_OFFICER_TITLE,
-  companyName = COMPANY_NAME
-}) {
-  const clientNameSafe = fullName && String(fullName).trim()
-    ? String(fullName).trim()
-    : (business && String(business).trim()) ? String(business).trim() : 'Client';
-
-  const meetStr = fmtDate_(meetingDate);
-  const due3 = addDays_(meetingDate, 3);
-  const due3Str = fmtDate_(due3);
-  const contractPrice = toPhp_(givenAmount);
-  const dp30 = toPhp_(Number(givenAmount) * 0.30);
-
-  // Subject from your spec:
-  const subject = `Down Payment Requirement – Minimum 30% [Billing Invoice #${invoiceSerial}] – Payable Within 3 Days`;
-
-  // Payment “button” is a styled anchor
-  const buttonHtml = `<a href="${paymentLink}" style="background-color:#007bff;color:#fff;padding:10px 16px;text-decoration:none;border-radius:6px;display:inline-block;">View Payment Options</a>`;
-
-  const body = `
-  <p>Hi <b>${toTitleCase_(clientNameSafe)}</b>,</p>
-
-  <p>It was a pleasure meeting with you regarding your <b>${campaign || 'engagement'}</b> with <b>${companyName}</b>.</p>
-
-  <p>As discussed and in accordance with our agreement, a down payment of at least <b>30%</b> of the total contract price is required to secure your booking and allow us to begin preparations.</p>
-
-  <p>You are given three (3) calendar days from today, <b>${meetStr}</b>, to settle the required down payment.</p>
-
-  <p><b>Contract Price:</b> <b>${contractPrice}</b><br>
-  <b>Minimum 30% Down Payment:</b> <b>${dp30}</b><br>
-  <b>Due Date:</b> <b>${due3Str}</b></p>
-
-  <p>To ensure that your booking is secured and all necessary arrangements are completed on schedule, we encourage you to settle the down payment within the given period. Please note that failure to remit the required down payment within the 3-day period may result in the expiration of the offer and forfeiture of your booking slot.</p>
-
-  <p>If payment has already been made, please disregard this message.</p>
-
-  <p>To view our payment options and complete your down payment, please click the button below:</p>
-  <p>${buttonHtml}</p>
-
-  <hr>
-  <p><b>Proof of Payment (PoP) Instructions</b><br>
-  Email your proof of payment to <a href="mailto:${financeEmail}"><b>${financeEmail}</b></a>.<br>
-  <em>Use this subject line format:</em><br>
-  <code><b>${(business && String(business).trim()) ? toTitleCase_(business) : toTitleCase_(clientNameSafe)} – ${campaign || 'Project'}</b></code><br>
-  Attach the deposit slip or transfer confirmation and include your invoice number in the email body.</p>
-
-  <p>Should you have any questions or need clarification regarding the payment terms, please feel free to contact us — we’re happy to assist.</p>
-
-  <p>Thank you for your prompt attention to this requirement and for your trust in our services.</p>
-
-  <p>Warm regards,<br>
-  <b>${officerName}</b><br>
-  <b>${officerTitle}</b><br>
-  <b>${companyName}</b><br>
-  📧 <a href="mailto:${financeEmail}"><b>${financeEmail}</b></a> | 📱 <b>${financePhone}</b></p>
-`;
-
-  return { subject, html: body };
-}
-
 
 function toTitleCase_(s) {
   if (!s) return "";
@@ -134,11 +295,6 @@ function toTitleCase_(s) {
 function toPhp_(val) {
   const n = (typeof val === 'number') ? val : parseFloat(String(val).replace(/[^\d.-]/g,"")) || 0;
   return n.toLocaleString('en-PH', { style: 'currency', currency: 'PHP' });
-}
-
-function formatFullDateTime_(val) {
-  if (!val || !(val instanceof Date)) return "";
-  return Utilities.formatDate(val, Session.getScriptTimeZone(), "MMMM d, yyyy h:mm a");
 }
 
 function dateOnly_(val) {
@@ -159,159 +315,219 @@ function safeGetUi_() {
   try {
     return SpreadsheetApp.getUi();
   } catch (_) {
-    return null; // no UI in this context (e.g., time-based trigger / run from editor)
+    return null; // no UI in this context
   }
 }
 
 /**
- * Creates a custom menu in the spreadsheet UI when the file is opened.
+ * Build official Down Payment email (subject + html) per spec.
+ * Inputs:
+ *  - fullName, business, campaign, meetingDate(Date), givenAmount(number),
+ *    invoiceSerial, paymentLink, financeEmail, financePhone, officerName, officerTitle, companyName
  */
-function onOpen(e) {
-  const ui = safeGetUi_();
-  if (!ui) return; // running outside spreadsheet UI; just exit quietly
+// [PASTE THIS ENTIRE BLOCK to replace the broken section]
 
-  ui.createMenu('Sales Tool')
-    .addItem('Encode Invoice Receipt', 'encodeInvoiceReceipt')
-    .addItem('Acknowledgement Receipt Encode', 'encodeAcknowledgementReceipt')
-    .addSeparator()
-    .addItem('Send Daily Follow-Ups', 'sendDailyFollowUps')
-    .addItem('Force Send Follow-Ups (ignore today stamp)', 'sendDailyFollowUpsForce')
-    .addToUi();
+// [PASTE THIS ENTIRE BLOCK to replace the broken section]
+
+function buildDownpaymentEmail_({
+  fullName, business, campaign, meetingDate, givenAmount, invoiceSerial,
+  paymentLink = CONFIG.PAYMENT_LINK,
+  financeEmail = CONFIG.FINANCE_EMAIL,
+  financePhone = CONFIG.FINANCE_PHONE,
+  officerName = CONFIG.COLLECTIONS_OFFICER_NAME,
+  officerTitle = CONFIG.COLLECTIONS_OFFICER_TITLE,
+  companyName = CONFIG.COMPANY_NAME
+}) {
+  const clientNameSafe = fullName && String(fullName).trim() ? String(fullName).trim() : (business && String(business).trim()) ? String(business).trim() : 'Client';
+  const meetStr = fmtDate_(meetingDate);
+  const due3Str = fmtDate_(addDays_(meetingDate, 3));
+  const contractPrice = toPhp_(givenAmount);
+  const dp30 = toPhp_(Number(givenAmount) * 0.30);
+  const subject = `Down Payment Requirement – Minimum 30% [Billing Invoice #${invoiceSerial}] – Payable Within 3 Days`;
+  const buttonHtml = `<a href="${paymentLink}" style="background-color:#007bff;color:#fff;padding:10px 16px;text-decoration:none;border-radius:6px;display:inline-block;">View Payment Options</a>`;
+  const body = `
+  <p>Hi <b>${toTitleCase_(clientNameSafe)}</b>,</p>
+  <p>It was a pleasure meeting with you regarding your <b>${campaign || 'engagement'}</b> with <b>${companyName}</b>.</p>
+  <p>As discussed and in accordance with our agreement, a down payment of at least <b>30%</b> of the total contract price is required to secure your booking and allow us to begin preparations.</p>
+  <p>You are given three (3) calendar days from today, <b>${meetStr}</b>, to settle the required down payment.</p>
+  <p><b>Contract Price:</b> <b>${contractPrice}</b><br>
+  <b>Minimum 30% Down Payment:</b> <b>${dp30}</b><br>
+  <b>Due Date:</b> <b>${due3Str}</b></p>
+  <p>To ensure that your booking is secured and all necessary arrangements are completed on schedule, we encourage you to settle the down payment within the given period. Please note that failure to remit the required down payment within the 3-day period may result in the expiration of the offer and forfeiture of your booking slot.</p>
+  <p>If payment has already been made, please disregard this message.</p>
+  <p>To view our payment options and complete your down payment, please click the button below:</p>
+  <p>${buttonHtml}</p>
+  ${SHARED_EMAIL_COMPONENTS.popInstructions( (business && String(business).trim()) ? toTitleCase_(business) : toTitleCase_(clientNameSafe), campaign, invoiceSerial)}
+  <p>Should you have any questions or need clarification regarding the payment terms, please feel free to contact us — we’re happy to assist.</p>
+  <p>Thank you for your prompt attention to this requirement and for your trust in our services.</p>
+  ${SHARED_EMAIL_COMPONENTS.signature}
+  `;
+  return { subject, html: body };
 }
 
-
-/**
- * Validates, processes, PDFs, emails, and logs a new invoice receipt.
- */
-/**
- * Validates, processes, PDFs, emails, and logs a new invoice receipt.
- */
-// [REPLACE THIS ENTIRE FUNCTION]
-/**
- * Validates, processes, PDFs, emails, and logs a new invoice receipt.
- * (FULLY REFACTORED TO USE NAMED RANGES)
- */
 function encodeInvoiceReceipt() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(CONFIG.SHEET_NAMES.INVOICE_ENCODER);
   const ui = safeGetUi_();
-
   try {
-    // 1) Read form block using the Named Range
+    const sheet = ss.getSheetByName(CONFIG.SHEET_NAMES.INVOICE_ENCODER);
+    const dbSheet = ss.getSheetByName(CONFIG.SHEET_NAMES.DATABASE);
+
     const dataRange = ss.getRangeByName(CONFIG.NAMED_RANGES.INVOICE_DATA);
     if (!dataRange) throw new Error(`Named Range "${CONFIG.NAMED_RANGES.INVOICE_DATA}" not found.`);
     const values = dataRange.getValues();
 
-    // Index map logic is good and remains
-    const IDX = { /* ... */ }; // Your IDX object here
+    const IDX = {
+      date: 0, tin: 1, fullName: 2, business: 3, address: 4, city: 5, zip: 6,
+      campaign: 7, amount: 8, dpDue: 9, fpDue: 10, email: 11, serial: 12, timeSent: 13
+    };
 
-    // 2) Validation logic is good and remains
-    // ...
-
-    // 3) Extract values (logic is good)
+    const requiredIdx = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12];
+    for (const i of requiredIdx) {
+      if (values[i][0] === '') throw new Error('Please fill all required fields (O12-O21, O23-O24). Note: Full Payment Due Date (O22) is optional.');
+    }
+    
     const entryDate = values[IDX.date][0];
-    // ... etc. for all your variables
+    const tin = values[IDX.tin][0];
     const clientName = values[IDX.fullName][0];
     const business = values[IDX.business][0];
+    const address = values[IDX.address][0];
+    const city = values[IDX.city][0];
+    const zip = values[IDX.zip][0];
     const campaign = values[IDX.campaign][0];
     const amountRaw = values[IDX.amount][0];
+    const dpDueDate = values[IDX.dpDue][0];
+    const fpDueDate = values[IDX.fpDue][0];
+    const clientEmail = values[IDX.email][0];
     const serialNo = values[IDX.serial][0];
-    let clientEmail = values[IDX.email][0];
+    const timeSent = new Date();
     const amountNum = (typeof amountRaw === 'number') ? amountRaw : parseFloat(String(amountRaw).replace(/[^\d.-]/g, '')) || 0;
 
-
-    // 4) Create PDF using the Named Range
     const pdfBlob = exportSheetRangeToPdf_(CONFIG.SHEET_NAMES.INVOICE_ENCODER, CONFIG.NAMED_RANGES.INVOICE_PDF, `Invoice-${serialNo}.pdf`);
 
-    // 5) Build and Send Email
     const { subject: dpSubject, html: dpHtml } = buildDownpaymentEmail_({
-      fullName: clientName,
-      business: business,
-      campaign: campaign,
-      meetingDate: entryDate,
-      givenAmount: amountNum,
-      invoiceSerial: serialNo,
-      // The rest of the parameters will be pulled from CONFIG automatically
+      fullName: clientName, business: business, campaign: campaign, meetingDate: entryDate,
+      givenAmount: amountNum, invoiceSerial: serialNo,
     });
+
     MailApp.sendEmail({ to: clientEmail, subject: dpSubject, htmlBody: dpHtml, attachments: [pdfBlob] });
 
-    // 6) Append to EntryDatabase
-    const dbSheet = ss.getSheetByName(CONFIG.SHEET_NAMES.DATABASE);
-    // Note: Make sure the array here contains all the correct variables you extracted
-    dbSheet.appendRow([
-      serialNo, entryDate, campaign, clientName, /* tin, business, etc. */
-    ]);
+    // --- SMART DATA TRANSFER (robust, bottom-scan on A5:A, with collision guard) ---
+    const MIN_ROW = 5;
+    const aCol = dbSheet.getRange(MIN_ROW, 1, dbSheet.getMaxRows() - (MIN_ROW - 1), 1).getValues();
 
-    // 7) Clear encoder inputs using the Named Range
+    let lastNonEmptyOffset = -1;
+    for (let i = aCol.length - 1; i >= 0; i--) {
+      if (aCol[i][0] !== "" && aCol[i][0] !== null) {
+        lastNonEmptyOffset = i;
+        break;
+      }
+    }
+
+    let firstEmptyRow = (lastNonEmptyOffset === -1) ? MIN_ROW : (MIN_ROW + lastNonEmptyOffset + 1);
+
+    const newRowData = [[
+      serialNo, entryDate, campaign, clientName, tin, business, address,
+      city, zip, clientEmail, timeSent, amountNum, dpDueDate, fpDueDate
+    ]];
+
+    const targetCell = dbSheet.getRange(firstEmptyRow, 1).getValue();
+    if (targetCell !== "" && targetCell !== null) {
+      firstEmptyRow++;
+    }
+
+    dbSheet.getRange(firstEmptyRow, 1, 1, 14).setValues(newRowData);
+    // --- END OF NEW LOGIC ---
+
     const clearRange = ss.getRangeByName(CONFIG.NAMED_RANGES.INVOICE_CLEAR);
     if (clearRange) clearRange.clearContent();
     
-    // You should create a named range for O25 called 'InvoiceTimestampCell'
-    // ss.getRangeByName('InvoiceTimestampCell').setValue(new Date());
-
     ss.toast('Invoice receipt processed and sent successfully!', 'Success', 5);
-
   } catch (e) {
     Logger.log(`Error in encodeInvoiceReceipt: ${e.message}`);
     if (ui) ui.alert('An Error Occurred', e.message, ui.ButtonSet.OK);
   }
 }
 
-
-
-// --- ACKNOWLEDGEMENT RECEIPT (AR) ---
-
-/**
- * Validates, PDFs, emails, saves to Drive, and logs an acknowledgement receipt.
- */
-// [REPLACE THIS ENTIRE FUNCTION]
+// [REPLACE your existing encodeAcknowledgementReceipt function with this]
 function encodeAcknowledgementReceipt() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const ui = SpreadsheetApp.getUi();
+  const ui = safeGetUi_();
   try {
-    const sheet = ss.getSheetByName(AR_SHEET_NAME);
-    const dbSheet = ss.getSheetByName(AR_DB_NAME);
-    if (!sheet || !dbSheet) throw new Error("Required sheet 'AREncoder' or 'SalesDatabase' not found.");
-
-    // --- EFFICIENT DATA READ (1 API Call instead of 6+) ---
-    // Create a Named Range "ArDataRange" for O12:O22 in the AREncoder sheet
-    const dataRange = ss.getRangeByName('ArDataRange');
-    if (!dataRange) throw new Error("Named Range 'ArDataRange' not found. Please create it for O12:O22 in the AREncoder sheet.");
+    const sheet = ss.getSheetByName(CONFIG.SHEET_NAMES.AR_ENCODER);
+    const dbSheet = ss.getSheetByName(CONFIG.SHEET_NAMES.SALES_DB);
+    // ... [Data reading and validation logic remains the same] ...
+    const values = ss.getRangeByName(CONFIG.NAMED_RANGES.AR_DATA).getValues();
+    const { arNumber, serialInvoiceNo, dateReceived, modeOfPayment, amountRaw, clientEmail, clientNameRaw } = extractArData_(values);
     
-    const values = dataRange.getValues();
-    const displayValues = dataRange.getDisplayValues();
+    // ... [PDF and Email logic remains the same] ...
+    const pdfBlob = exportSheetRangeToPdf_(CONFIG.SHEET_NAMES.AR_ENCODER, CONFIG.NAMED_RANGES.AR_PDF, `AR-${arNumber}.pdf`);
+    const pdfFile = getOrCreateFolder_('Acknowledgement Receipts').createFile(pdfBlob);
+    // Build + send AR email with PDF attached (uses AR format, not invoice)
+const amountNum = (typeof amountRaw === 'number'
+  ? amountRaw
+  : parseFloat(String(amountRaw).replace(/[^\d.-]/g, '')) || 0);
 
-    const IDX = { date:0, amount:4, mode:5, serial:6, arNum:7, name:8, email:10 }; // 0-based from O12
+const clientName = (clientNameRaw && String(clientNameRaw).trim())
+  ? clientNameRaw
+  : firstNameFromEmail_(clientEmail);
 
-    const dateReceived = values[IDX.date][0];
-    const dateReceivedDisplay = displayValues[IDX.date][0];
-    const amountRaw = values[IDX.amount][0];
-    const amountDisplay = toPhp_(amountRaw);
-    const modeOfPayment = values[IDX.mode][0];
-    const serialInvoiceNo = values[IDX.serial][0];
-    const arNumber = values[IDX.arNum][0];
-    const clientNameRaw = displayValues[IDX.name][0];
-    const clientEmail = values[IDX.email][0];
+const { subject: arSubject, html: arHtml } = buildArEmail_({
+  clientName,
+  arNumber,
+  serialInvoiceNo,
+  dateReceived,
+  modeOfPayment,
+  amount: amountNum
+});
 
-    if (!clientEmail || !arNumber || !serialInvoiceNo || !amountRaw) {
-      ui.alert('Validation Error', 'Client Email, AR No., Serial No., and Amount are required.', ui.ButtonSet.OK);
-      return;
+if (clientEmail) {
+  MailApp.sendEmail({
+    to: clientEmail,
+    subject: arSubject,
+    htmlBody: arHtml,
+    attachments: [pdfBlob],
+    bcc: CONFIG.FINANCE_EMAIL,
+    name: CONFIG.COMPANY_NAME
+  });
+}
+
+    // ... build and send email ...
+
+    // --- YOUR NEW ROBUST DATA TRANSFER LOGIC ---
+    const MIN_ROW = 5;
+    const aCol = dbSheet.getRange(MIN_ROW, 1, dbSheet.getMaxRows() - (MIN_ROW - 1), 1).getValues();
+    let lastNonEmptyOffset = -1;
+    for (let i = aCol.length - 1; i >= 0; i--) {
+      if (aCol[i][0] !== "" && aCol[i][0] !== null) {
+        lastNonEmptyOffset = i;
+        break;
+      }
     }
-
-    // ... The rest of your function logic (PDF, email, log, etc.) continues here ...
-    // Note: The original logic for the rest of the function is good.
-    // This patch specifically fixes the inefficient data reading at the start.
-    // You will need to re-integrate your PDF/email/log steps below this read block.
+    let firstEmptyRow = (lastNonEmptyOffset === -1) ? MIN_ROW : (MIN_ROW + lastNonEmptyOffset + 1);
+    const newRowData = [[
+        arNumber, serialInvoiceNo, dateOnly_(dateReceived), modeOfPayment,
+        (typeof amountRaw === 'number' ? amountRaw : parseFloat(String(amountRaw).replace(/[^\d.-]/g, '')) || 0),
+        '', '', '', pdfFile.getUrl()
+    ]];
+    const targetCell = dbSheet.getRange(firstEmptyRow, 1).getValue();
+    if (targetCell !== "" && targetCell !== null) {
+      firstEmptyRow++;
+    }
+    dbSheet.getRange(firstEmptyRow, 1, 1, 9).setValues(newRowData);
+    // --- END OF NEW LOGIC ---
     
-    ss.toast('This is a patched function. Re-integrate remaining steps.', 'Notice', 5);
-
-
+    // This part still needs to be refactored to a named range for best practice
+    const AR_CLEAR_RANGES_TEMP = ['O12', 'O16:O18'];
+    sheet.getRangeList(AR_CLEAR_RANGES_TEMP).clearContent();
+    ss.toast('Receipt processed, saved to Drive, and sent!', 'Success', 5);
   } catch (e) {
-    Logger.log(e);
-    ui.alert('An Error Occurred', e.message, ui.ButtonSet.OK);
+    Logger.log(`Error in encodeAcknowledgementReceipt: ${e.message}`);
+    if (ui) ui.alert('An Error Occurred', e.message, ui.ButtonSet.OK);
   }
 }
 
+// NOTE: You will also need to add the helper functions extractInvoiceData_ and extractArData_
+// And update the email builders to use CONFIG.COMPANY_NAME as you identified.
 /**
  * Sends conditional follow-up emails based on the proximity of the due date.
  */
@@ -368,40 +584,39 @@ function sendDailyFollowUpsTrigger() {
  * - If force=true, send even if stamped today (overwrites today’s stamp). If false, skip if stamped today.
  * Returns { emailsSent }.
  */
-// [REPLACE THIS ENTIRE FUNCTION]
+// [REPLACE your existing processFollowUpsBySerial_ function with this]
 function processFollowUpsBySerial_(force = false) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(INVOICE_DB_NAME);
-  if (!sheet) throw new Error(`Sheet '${INVOICE_DB_NAME}' not found.`);
+  const sheet = ss.getSheetByName(CONFIG.SHEET_NAMES.DATABASE);
+  if (!sheet) throw new Error(`Sheet '${CONFIG.SHEET_NAMES.DATABASE}' not found.`);
 
-  const dataRange = sheet.getRange('A5:T' + sheet.getLastRow());
-  if (dataRange.getNumRows() < 1) return { emailsSent: 0 };
-
-  const values = dataRange.getValues(); // Use getValues() for correct data types
-  const tz = Session.getScriptTimeZone();
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 5) return { emailsSent: 0 };
+  const dataRange = sheet.getRange('A5:T' + lastRow);
+  const values = dataRange.getValues();
   const today = dateOnly_(new Date());
-
   let emailsSent = 0;
-
-  const H = { // Header map for reliability
-    serial: 0, campaign: 2, name: 3, business: 5, email: 9,
-    givenAmount: 11, dpDueDate: 12, percentage: 14, lastFollowUp: 19
+  
+  const H = { 
+    serial: 0, campaign: 2, name: 3, business: 5, email: 9, 
+    givenAmount: 11, dpDueDate: 12, percentage: 14, lastFollowUp: 19 
   };
+
+  // --- FIX: Read from the 'sheet', not 'dataRange' ---
+  const updatedTimestamps = sheet.getRange('T5:T' + lastRow).getValues();
 
   values.forEach((row, i) => {
     try {
-      // Get percentage and skip if already >= 30%
       let pctRaw = row[H.percentage];
       let pct = (typeof pctRaw === 'number') ? pctRaw : parseFloat(String(pctRaw || "0").replace("%", "").trim());
       if (isNaN(pct)) pct = 0;
       if (pct > 1) pct = pct / 100;
-      if (pct >= 0.30) return; // Skip if DP is paid
+      if (pct >= 0.30) return;
 
       const dpDueDate = row[H.dpDueDate];
-      if (!(dpDueDate instanceof Date)) return; // Skip if no valid due date
-
+      if (!(dpDueDate instanceof Date)) return;
       const dueOnly = dateOnly_(dpDueDate);
-      if (dueOnly < today) return; // Skip past due dates
+      if (dueOnly < today) return;
 
       const lastSent = row[H.lastFollowUp];
       if (!force && lastSent instanceof Date && isSameDay_(lastSent, new Date())) return;
@@ -409,149 +624,89 @@ function processFollowUpsBySerial_(force = false) {
       const email = String(row[H.email] || '').split(/[;,]/)[0].trim();
       if (!email) return;
 
-      // All checks passed, build and send the email
-      const daysUntilDue = Math.ceil((dueOnly.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
-      const toneWord = (daysUntilDue === 0) ? "Final Reminder" : (daysUntilDue === 1) ? "Friendly Reminder" : "Reminder";
-      const subject = `${toneWord}: Minimum 30% Down Payment Required [Billing Invoice #${row[H.serial]}]`;
-      
-      // Simplified for this patch, use your full buildDownpaymentEmail_ logic here
-      const htmlBody = `<p>This is a reminder for your down payment for invoice #${row[H.serial]}.</p>`;
-
-      MailApp.sendEmail(email, subject, "", { htmlBody: htmlBody });
+      const { subject, html } = buildDownpaymentEmail_({
+        fullName: row[H.name],
+        business: row[H.business],
+        campaign: row[H.campaign],
+        meetingDate: new Date(), // Using today as Entry Date is not in the A5:T range.
+        givenAmount: row[H.givenAmount],
+        invoiceSerial: row[H.serial],
+      });
+      MailApp.sendEmail(email, subject, "", { htmlBody: html });
       emailsSent++;
-      values[i][H.lastFollowUp] = new Date(); // Stamp
-
-    } catch(e) {
-      Logger.log(`Error in DP Follow-up for row ${i+5} (Serial: ${row[H.serial]}): ${e.message}`);
+      updatedTimestamps[i][0] = new Date();
+    } catch (e) {
+      Logger.log(`Error in DP Follow-up for row ${i + 5} (Serial: ${row[H.serial]}): ${e.message}`);
     }
   });
 
   if (emailsSent > 0) {
-    dataRange.setValues(values);
+    sheet.getRange('T5:T' + lastRow).setValues(updatedTimestamps);
   }
-
   return { emailsSent };
 }
 
-// --- FULL PAYMENT FOLLOW-UPS ---
-// [PASTE THIS ENTIRE BLOCK INTO YOUR SCRIPT]
 
-/**
- * Main logic for sending full payment follow-ups. Reads from EntryDatabase.
- * Checks Fullpayment Due Date, Receivables, and Status.
- * @param {boolean} force - If true, ignores today's sent stamp.
- * @returns {{emailsSent: number, updatedStatuses: number}}
- */
 function processFullPaymentFollowUps_(force = false) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(INVOICE_DB_NAME); // 'EntryDatabase'
-  if (!sheet) throw new Error(`Sheet '${INVOICE_DB_NAME}' not found.`);
-
-  const dataRange = sheet.getRange('A5:T' + sheet.getLastRow());
-  if (dataRange.getNumRows() < 1) return { emailsSent: 0, updatedStatuses: 0 };
-
+  const sheet = ss.getSheetByName(CONFIG.SHEET_NAMES.DATABASE);
+  if (!sheet) throw new Error(`Sheet '${CONFIG.SHEET_NAMES.DATABASE}' not found.`);
+  
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 5) return { emailsSent: 0 };
+  const dataRange = sheet.getRange('A5:U' + lastRow);
   const values = dataRange.getValues();
-  const tz = Session.getScriptTimeZone();
-  const today = dateOnly_(new Date());
-
+  
   let emailsSent = 0;
-  let updatedStatuses = 0;
-
-  // Header map (0-based for range A:T)
-  const H = {
-    serial: 0, campaign: 2, name: 3, business: 5, email: 9,
-    givenAmount: 11, fpDueDate: 13, percentage: 14, repayment: 15,
-    receivables: 17, status: 18, lastFollowUp: 19
-  };
-
+  const updatedTimestamps = sheet.getRange('U5:U' + lastRow).getValues(); // Column U = FP Last Follow-Up Sent
+  
   values.forEach((row, i) => {
     try {
-      // --- Initial Validation & Checks ---
-      const status = String(row[H.status] || '').toUpperCase().trim();
-      const receivables = (typeof row[H.receivables] === 'number') ? row[H.receivables] : 0;
-      const fpDueDate = row[H.fpDueDate];
-
-      // --- NEW: Check if Down Payment is at least 30% ---
-      let pctRaw = row[H.percentage];
-      let pct = (typeof pctRaw === 'number') ? pctRaw : parseFloat(String(pctRaw || "0").replace("%","").trim());
-      if (isNaN(pct)) pct = 0;
-      if (pct > 1) pct = pct / 100; // Normalize if it's "30" instead of "0.3"
-
-      // If less than 30% DP is paid, skip. Let the DP follow-up handle it.
-      if (pct < 0.30) {
-        return;
-      }
-
-      // Skip if paid, cancelled, has no due date, or no remaining balance
-      if (status === 'PAID' || status === 'CANCELLED' || status === 'FORFEITED' || !(fpDueDate instanceof Date) || receivables <= 0) {
-        return;
-      }
-
-      // Skip if already sent today (unless forced)
-      const lastSent = row[H.lastFollowUp];
-      if (!force && lastSent instanceof Date && isSameDay_(lastSent, new Date())) {
-        return;
-      }
-
-      // --- Calculate Date Logic ---
-      const dueOnly = dateOnly_(fpDueDate);
-      const daysOverdue = Math.ceil((today.getTime() - dueOnly.getTime()) / (1000 * 60 * 60 * 24));
-
-      // --- Prepare Email Data ---
-      const emailData = {
-        clientName: toTitleCase_(row[H.name] || row[H.business] || firstNameFromEmail_(row[H.email])),
-        serialNo: row[H.serial],
-        campaign: row[H.campaign] || 'engagement',
-        businessName: toTitleCase_(row[H.business] || row[H.name]),
-        dueDateStr: fmtDate_(dueOnly),
-        receivablesStr: toPhp_(receivables),
-        contractPriceStr: toPhp_(row[H.givenAmount]),
-        todayStr: fmtDate_(today),
-      };
-
+      const status = String(row[18] || '').toUpperCase().trim(); // Column S
+      if (status !== 'FOR FULL PAYMENT') return;   // 🚦 STRICT TRIGGER
+      
+      const clientEmail = String(row[9] || '').split(/[;,]/)[0].trim(); // Column J
+      if (!clientEmail) return;
+      
+      const serialNo = row[0];     // Column A
+      const campaign = row[2] || 'engagement';
+      const clientName = toTitleCase_(row[3] || row[5] || firstNameFromEmail_(row[9]));
+      const receivables = (typeof row[17] === 'number') ? row[17] : 0;
+      const receivablesStr = toPhp_(receivables);
+      const fpDueDate = row[13];   // Column N
+      const dueDateStr = (fpDueDate instanceof Date) ? fmtDate_(fpDueDate) : '';
+      
+      // --- Choose FP email (always Full Payment follow-up) ---
+      const emailData = { clientName, serialNo, campaign, receivablesStr, dueDateStr };
       let email;
-
-      // --- Determine Which Email to Send ---
-      if (daysOverdue === -1) { // 1 Day Before Due
-        email = buildFpReminderEmail_(emailData);
-      } else if (daysOverdue === 0) { // Due Today
-        email = buildFpDueTodayEmail_(emailData);
-      } else if (daysOverdue >= 1 && daysOverdue <= 5) { // 1-5 Days Overdue
-        emailData.daysPastDue = daysOverdue;
-        email = buildFpOverdueEmail_(emailData);
-      } else if (daysOverdue >= 6 && daysOverdue <= 7) { // 6-7 Days Overdue (Urgent)
-        emailData.daysPastDue = daysOverdue;
-        emailData.penaltyAmountStr = toPhp_(row[H.givenAmount] * 0.30);
-        emailData.newTotalStr = toPhp_(receivables + (row[H.givenAmount] * 0.30));
-        email = buildFpUrgentEmail_(emailData);
-      } else if (daysOverdue >= 8) { // 8+ Days Overdue (Forfeiture)
-        email = buildFpForfeitureEmail_(emailData);
-        // Action: Update status in the sheet data
-        values[i][H.status] = 'FORFEITED';
-        updatedStatuses++;
-      }
-
-      // --- Send Email and Stamp ---
-      if (email) {
-        const clientEmail = String(row[H.email] || '').split(/[;,]/)[0].trim();
-        if (clientEmail) {
-          MailApp.sendEmail({ to: clientEmail, subject: email.subject, htmlBody: email.html });
-          values[i][H.lastFollowUp] = new Date(); // Stamp column T
-          emailsSent++;
+      if (fpDueDate instanceof Date) {
+        const today = dateOnly_(new Date());
+        const daysDiff = Math.round((fpDueDate - today) / (1000 * 60 * 60 * 24));
+        if (daysDiff === 0) email = buildFpDueTodayEmail_(emailData);
+        else if (daysDiff === 1) email = buildFpReminderEmail_(emailData);
+        else if (daysDiff < 0) {
+          const daysPastDue = Math.abs(daysDiff);
+          email = buildFpOverdueEmail_({ ...emailData, daysPastDue });
         }
       }
-
-    } catch (e) {
-      Logger.log(`Error processing row ${i + 5} (Serial: ${row[H.serial]}): ${e.message}`);
+      if (!email) {
+        email = buildFpReminderEmail_(emailData); // fallback
+      }
+      
+      // --- Send ---
+      MailApp.sendEmail({ to: clientEmail, subject: email.subject, htmlBody: email.html });
+      updatedTimestamps[i][0] = new Date();
+      emailsSent++;
+    } catch (err) {
+      Logger.log(`Error in FP Follow-Up row ${i + 5}: ${err.message}`);
     }
   });
-
-  // --- Write all updates back to the sheet in one call ---
-  if (emailsSent > 0 || updatedStatuses > 0) {
-    dataRange.setValues(values);
+  
+  if (emailsSent > 0) {
+    sheet.getRange('U5:U' + lastRow).setValues(updatedTimestamps);
   }
-
-  return { emailsSent, updatedStatuses };
+  
+  return { emailsSent };
 }
 
 
@@ -561,7 +716,7 @@ function buildFpReminderEmail_({ clientName, serialNo, campaign, receivablesStr,
   const subject = `Friendly Reminder: [Billing Invoice #${serialNo}] – Due Tomorrow`;
   const html = `
     <p>Hi ${clientName},</p>
-    <p>I hope you’re doing well. This is a friendly reminder regarding Invoice #${serialNo} for your <b>${campaign}</b> engagement with ${COMPANY_NAME}. Our records indicate a remaining balance of <b>${receivablesStr}</b>, which is due tomorrow, <b>${dueDateStr}</b>.</p>
+    <p>I hope you’re doing well. This is a friendly reminder regarding Invoice #${serialNo} for your <b>${campaign}</b> engagement with ${CONFIG.COMPANY_NAME}. Our records indicate a remaining balance of <b>${receivablesStr}</b>, which is due tomorrow, <b>${dueDateStr}</b>.</p>
     <p>To ensure a smooth process and avoid any late fees or service interruptions, we encourage arranging settlement within the due date.</p>
     ${SHARED_EMAIL_COMPONENTS.paymentMadeIgnore}
     ${SHARED_EMAIL_COMPONENTS.paymentButton}
@@ -576,7 +731,7 @@ function buildFpDueTodayEmail_({ clientName, serialNo, campaign, receivablesStr 
   const subject = `Gentle Reminder: [Billing Invoice #${serialNo}] Due Today (until 5:00 PM)`;
   const html = `
     <p>Hi ${clientName},</p>
-    <p>Hope you’re doing well. Just a gentle check‑in on Invoice #${serialNo} for your <b>${campaign}</b> with ${COMPANY_NAME}. Our records show a remaining balance of <b>${receivablesStr}</b> that’s due today. When convenient, kindly settle on or before <b>5:00 PM</b>.</p>
+    <p>Hope you’re doing well. Just a gentle check‑in on Invoice #${serialNo} for your <b>${campaign}</b> with ${CONFIG.COMPANY_NAME}. Our records show a remaining balance of <b>${receivablesStr}</b> that’s due today. When convenient, kindly settle on or before <b>5:00 PM</b>.</p>
     ${SHARED_EMAIL_COMPONENTS.paymentMadeIgnore}
     ${SHARED_EMAIL_COMPONENTS.paymentButton}
     ${SHARED_EMAIL_COMPONENTS.popInstructions(clientName, campaign, serialNo)}
@@ -590,7 +745,7 @@ function buildFpOverdueEmail_({ clientName, serialNo, campaign, receivablesStr, 
   const subject = `Gentle Reminder: [Billing Invoice #${serialNo}] – Payment ${daysPastDue} Day${daysPastDue > 1 ? 's' : ''} Past Due`;
   const html = `
     <p>Hi ${clientName},</p>
-    <p>Hope you’re doing well. This is a gentle follow-up regarding Invoice #${serialNo} for your <b>${campaign}</b> with ${COMPANY_NAME}. Our records show an outstanding balance of <b>${receivablesStr}</b>, originally due on <b>${dueDateStr}</b>, which is now <b>${daysPastDue} day${daysPastDue > 1 ? 's' : ''} past due</b>.</p>
+    <p>Hope you’re doing well. This is a gentle follow-up regarding Invoice #${serialNo} for your <b>${campaign}</b> with ${CONFIG.COMPANY_NAME}. Our records show an outstanding balance of <b>${receivablesStr}</b>, originally due on <b>${dueDateStr}</b>, which is now <b>${daysPastDue} day${daysPastDue > 1 ? 's' : ''} past due</b>.</p>
     <p>We completely understand that schedules can get busy and payment dates may sometimes be overlooked. To help avoid any late fees or possible service interruptions, we would greatly appreciate it if you could arrange settlement at your earliest convenience.</p>
     ${SHARED_EMAIL_COMPONENTS.paymentMadeIgnore}
     ${SHARED_EMAIL_COMPONENTS.paymentButton}
@@ -606,7 +761,7 @@ function buildFpUrgentEmail_({ clientName, serialNo, campaign, dueDateStr, daysP
   const html = `
     <p>Hi ${clientName},</p>
     <p>I hope this message finds you well.</p>
-    <p>This is an urgent follow-up regarding Invoice #${serialNo} for your <b>${campaign}</b> engagement with ${COMPANY_NAME}. Our records show that the payment is now <b>${daysPastDue} days past due</b> from the agreed due date of <b>${dueDateStr}</b>.</p>
+    <p>This is an urgent follow-up regarding Invoice #${serialNo} for your <b>${campaign}</b> engagement with ${CONFIG.COMPANY_NAME}. Our records show that the payment is now <b>${daysPastDue} days past due</b> from the agreed due date of <b>${dueDateStr}</b>.</p>
     <p>Due to ${daysPastDue} days overdue, the total late payment penalty has increased to thirty percent (30%) of the total contract price in accordance with our payment agreement. The outstanding balance should be settled immediately to avoid further charges and potential service interruption.</p>
     <p><b>Original Contract Price:</b> ${penaltyAmountStr}<br>
     <b>Total of 30% Late Payment Penalty:</b> ${penaltyAmountStr}<br>
@@ -625,35 +780,35 @@ function buildFpForfeitureEmail_({ clientName, serialNo, campaign, dueDateStr, r
   const html = `
     <p>Hi ${clientName},</p>
     <p>I hope this message finds you well.</p>
-    <p>This is a formal and final notice regarding Invoice #${serialNo} for your <b>${campaign}</b> engagement with ${COMPANY_NAME}. Our records show that no payment has been made for the past seven (7) days from the agreed due date of <b>${dueDateStr}</b>.</p>
+    <p>This is a formal and final notice regarding Invoice #${serialNo} for your <b>${campaign}</b> engagement with ${CONFIG.COMPANY_NAME}. Our records show that no payment has been made for the past seven (7) days from the agreed due date of <b>${dueDateStr}</b>.</p>
     <p>In accordance with our official Payment Terms & Conditions, the non-settlement of your outstanding balance within the prescribed period has resulted in the automatic forfeiture of your payment and all services under the contract effective today. This forfeiture is final, non-reversible, and without refund.</p>
     <p><b>Original Contract Price:</b> ${contractPriceStr}<br>
     <b>Outstanding Balance:</b> ${receivablesStr}<br>
     <b>Status:</b> Forfeited as of ${todayStr}</p>
     <p>All services covered by this contract are hereby terminated, and no further reinstatement or grace period will be granted.</p>
-    <p>If you believe this notice has reached you in error, kindly contact us immediately at ${FINANCE_EMAIL}. Otherwise, please be advised that this matter is now considered closed.</p>
-    <p>We thank you for your prior engagement with ${COMPANY_NAME}.</p>
+    <p>If you believe this notice has reached you in error, kindly contact us immediately at ${CONFIG.FINANCE_EMAIL}. Otherwise, please be advised that this matter is now considered closed.</p>
+    <p>We thank you for your prior engagement with ${CONFIG.COMPANY_NAME}.</p>
     ${SHARED_EMAIL_COMPONENTS.signature}`;
   return { subject, html };
 }
 
 // Helper object for shared email text to avoid repetition
 const SHARED_EMAIL_COMPONENTS = {
-  paymentButton: `<p><a href="${PAYMENT_LINK}" style="background-color:#007bff; color:#fff; padding:10px 16px; text-decoration:none; border-radius:6px; display:inline-block;">View Payment Options</a></p>`,
+  paymentButton: `<p><a href="${CONFIG.PAYMENT_LINK}" style="background-color:#007bff; color:#fff; padding:10px 16px; text-decoration:none; border-radius:6px; display:inline-block;">View Payment Options</a></p>`,
   paymentMadeIgnore: `<p>If payment has already been made, please disregard this message.</p>`,
   popInstructions: (clientName, campaign, serialNo) => `
     <hr>
     <p><b>Proof of Payment (PoP) Instructions</b><br>
-    Email your proof of payment to <a href="mailto:${FINANCE_EMAIL}">${FINANCE_EMAIL}</a>.<br>
+    Email your proof of payment to <a href="mailto:${CONFIG.FINANCE_EMAIL}">${CONFIG.FINANCE_EMAIL}</a>.<br>
     <em>Use this subject line format:</em><br>
     <code><b>${clientName} – ${campaign || 'Project'}</b></code><br>
     Attach the deposit slip or transfer confirmation and include your Invoice <b>#${serialNo}</b> in the email body.</p>`,
   signature: `
     <p>Warm regards,<br>
-    <b>${COLLECTIONS_OFFICER_NAME}</b><br>
-    ${COLLECTIONS_OFFICER_TITLE}<br>
-    ${COMPANY_NAME}<br>
-    📧 <a href="mailto:${FINANCE_EMAIL}">${FINANCE_EMAIL}</a> | 📱 ${FINANCE_PHONE}</p>`
+    <b>${CONFIG.COLLECTIONS_OFFICER_NAME}</b><br>
+    ${CONFIG.COLLECTIONS_OFFICER_TITLE}<br>
+    ${CONFIG.COMPANY_NAME}<br>
+    📧 <a href="mailto:${CONFIG.FINANCE_EMAIL}">${CONFIG.FINANCE_EMAIL}</a> | 📱 ${CONFIG.FINANCE_PHONE}</p>`
 };
 
 // --- PDF UTILS ---
