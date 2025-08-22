@@ -11,7 +11,7 @@ function onOpen() {
       .addSeparator()
       
       // --- Follow-up Items ---
-      .addItem('Send FP Follow-Ups (Status = FOR FULL PAYMENT)', 'sendUpcomingFpFollowUps')
+      .addItem('Send FP Follow-Ups (≥30% Paid)', 'sendUpcomingFpFollowUps')
       .addItem('FORCE Send DP Daily Follow-Ups', 'sendDailyFollowUpsForce') // keep as-is unless you want to rename
 
       .addToUi();
