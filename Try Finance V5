@@ -135,7 +135,6 @@ function processUpcomingFpFollowUps_() {
 function sendUpcomingFpFollowUps() {
   const ui = (function(){ try { return SpreadsheetApp.getUi(); } catch(e) { return null; } })();
   try {
-    // Call the Status-only core (make sure na-apply mo na yung status-only patch sa processUpcomingFpFollowUps_):
     const result = processUpcomingFpFollowUps_();
     const msg = `${result.emailsSent} Full Payment follow-up email(s) sent.\nStamped: Column U (FP Last Follow-Up Sent)`;
     if (ui) ui.alert('FP Follow-Ups (Status = FOR FULL PAYMENT)', msg, ui.ButtonSet.OK);
@@ -147,107 +146,6 @@ function sendUpcomingFpFollowUps() {
 }
 
 
-
-/**
- * Processes the EntryDatabase to find and email clients with upcoming full payments.
- * Triggered manually from the UI.
- * - Checks for receivables > 0, paid % >= 30%, status is not final, and FP due date is today or tomorrow.
- * - Stamps Column U on the corresponding row after sending an email.
- * @returns {{emailsSent: number}} An object containing the count of emails sent.
- */
-function processUpcomingFpFollowUps_() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(CONFIG.SHEET_NAMES.DATABASE);
-  if (!sheet) throw new Error(`Sheet '${CONFIG.SHEET_NAMES.DATABASE}' not found.`);
-
-  const lastRow = sheet.getLastRow();
-  if (lastRow < 5) return { emailsSent: 0 }; 
-
-  // Optimized: Read the entire range once
-  const dataRange = sheet.getRange('A5:U' + lastRow); 
-  const values = dataRange.getValues();
-  const today = dateOnly_(new Date());
-  let emailsSent = 0;
-  
-  const H = { 
-    serial: 0, campaign: 2, name: 3, business: 5, email: 9, 
-    givenAmount: 11, fpDueDate: 13, // Column N
-    percentage: 14,                // Column O
-    receivables: 17,               // Column R
-    status: 18,                    // Column S
-    lastManualFpFollowUp: 20       // Column U
-  };
-
-  // Optimized: Create a copy of timestamps to update in memory. No second sheet read.
-  const updatedTimestamps = values.map(row => [row[H.lastManualFpFollowUp]]);
-  
-  // Helper for date comparison, defined locally for clarity
-  const isSameDay_ = (d1, d2) => d1.getFullYear() === d2.getFullYear() && d1.getMonth() === d2.getMonth() && d1.getDate() === d2.getDate();
-
-  values.forEach((row, i) => {
-    try {
-      // --- PATCHED: Idempotency Check ---
-      const lastSent = row[H.lastManualFpFollowUp];
-      if (lastSent instanceof Date && isSameDay_(lastSent, new Date())) {
-        return; // Already sent today, do not spam.
-      }
-      
-      // --- Condition Checks from your request ---
-      const receivables = (typeof row[H.receivables] === 'number') ? row[H.receivables] : 0;
-      if (receivables <= 0) return;
-
-      // --- PATCHED: Robust Percentage Calculation ---
-      const pctRaw = row[H.percentage];
-      let pct = 0;
-      if (typeof pctRaw === 'number') {
-        // If number is 30, treat as 30%. If it's 0.3, treat as 30%.
-        pct = pctRaw >= 1 ? pctRaw / 100 : pctRaw;
-      } else {
-        // Handle text formats like "30%" or just "30"
-        pct = parseFloat(String(pctRaw || "0").replace(/[^0-9.-]+/g,"")) / 100;
-      }
-      if (isNaN(pct) || pct < 0.30) return;
-      
-      const fpDueDate = row[H.fpDueDate];
-      if (!(fpDueDate instanceof Date)) return;
-      const dueOnly = dateOnly_(fpDueDate);
-      if (dueOnly < today) return;
-
-      const status = String(row[H.status] || '').toUpperCase().trim();
-      if (status === 'PAID' || status === 'CANCELLED' || status === 'FORFEITED') return;
-      
-      const daysUntilDue = Math.round((dueOnly.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
-      
-      const emailData = {
-        clientName: toTitleCase_(row[H.name] || row[H.business] || firstNameFromEmail_(row[H.email])),
-        serialNo: row[H.serial],
-        campaign: row[H.campaign] || 'engagement',
-        receivablesStr: toPhp_(receivables),
-        dueDateStr: fmtDate_(dueOnly),
-      };
-
-      let email;
-      if (daysUntilDue === 0) { email = buildFpDueTodayEmail_(emailData); } 
-      else if (daysUntilDue === 1) { email = buildFpReminderEmail_(emailData); } 
-      else { return; }
-      
-      const clientEmail = String(row[H.email] || '').split(/[;,]/)[0].trim();
-      if (clientEmail && email) {
-        MailApp.sendEmail({ to: clientEmail, subject: email.subject, htmlBody: email.html });
-        updatedTimestamps[i][0] = new Date();
-        emailsSent++;
-      }
-    } catch (e) {
-      Logger.log(`Error processing manual FP Follow-up for row ${i + 5} (Serial: ${row[H.serial]}): ${e.message}`);
-    }
-  });
-
-  if (emailsSent > 0) {
-    sheet.getRange('U5:U' + lastRow).setValues(updatedTimestamps);
-  }
-  
-  return { emailsSent };
-}
 
 // --- CONFIGURATION CONSTANTS ---
 const CONFIG = {
