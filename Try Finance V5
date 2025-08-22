@@ -134,6 +134,37 @@ function processUpcomingFpFollowUps_() {
   return { emailsSent };
 }
 
+function buildArEmail_({
+  clientName,
+  arNumber,
+  serialInvoiceNo,
+  dateReceived,
+  modeOfPayment,
+  amount
+}) {
+  const nameSafe = toTitleCase_(clientName || 'Client');
+  const dateStr = fmtDate_(dateReceived);
+  const amountStr = toPhp_(amount);
+  const subject = `Acknowledgement Receipt #${arNumber} — Payment Received`;
+  const html = `
+    <p>Hi ${nameSafe},</p>
+    <p>Thank you for your payment. Please find attached your <b>Acknowledgement Receipt</b>.</p>
+    <p>
+      <b>AR #:</b> ${arNumber}<br>
+      <b>Invoice #:</b> ${serialInvoiceNo}<br>
+      <b>Date Received:</b> ${dateStr}<br>
+      <b>Mode of Payment:</b> ${modeOfPayment || '—'}<br>
+      <b>Amount Received:</b> ${amountStr}
+    </p>
+    <p>If you have any questions, feel free to contact us at
+      <a href="mailto:${CONFIG.FINANCE_EMAIL}">${CONFIG.FINANCE_EMAIL}</a> or ${CONFIG.FINANCE_PHONE}.
+    </p>
+    ${SHARED_EMAIL_COMPONENTS.signature}
+  `;
+  return { subject, html };
+}
+
+
 
 function sendUpcomingFpFollowUps() {
   const ui = (function(){ try { return SpreadsheetApp.getUi(); } catch(e) { return null; } })();
@@ -424,6 +455,39 @@ function encodeAcknowledgementReceipt() {
     const pdfBlob = exportSheetRangeToPdf_(CONFIG.SHEET_NAMES.AR_ENCODER, CONFIG.NAMED_RANGES.AR_PDF, `AR-${arNumber}.pdf`);
     const pdfFile = getOrCreateFolder_('Acknowledgement Receipts').createFile(pdfBlob);
     // ... build and send email ...
+    // >>> ADD THIS EMAIL BLOCK HERE <<<
+// Build + send AR email with PDF attached
+const amountNum = (typeof amountRaw === 'number'
+  ? amountRaw
+  : parseFloat(String(amountRaw).replace(/[^\d.-]/g, '')) || 0);
+
+const clientName = (clientNameRaw && String(clientNameRaw).trim())
+  ? clientNameRaw
+  : firstNameFromEmail_(clientEmail);
+
+const { subject: arSubject, html: arHtml } = buildArEmail_({
+  clientName,
+  arNumber,
+  serialInvoiceNo,
+  dateReceived,
+  modeOfPayment,
+  amount: amountNum
+});
+
+if (clientEmail) {
+  MailApp.sendEmail({
+    to: clientEmail,
+    subject: arSubject,
+    htmlBody: arHtml,
+    attachments: [pdfBlob],
+    bcc: CONFIG.FINANCE_EMAIL,
+    name: CONFIG.COMPANY_NAME
+  });
+}
+// <<< END EMAIL BLOCK >>>
+
+// --- YOUR NEW ROBUST DATA TRANSFER LOGIC ---
+const MIN_ROW = 5;
 
     // --- YOUR NEW ROBUST DATA TRANSFER LOGIC ---
     const MIN_ROW = 5;
