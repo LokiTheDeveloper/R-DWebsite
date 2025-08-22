@@ -17,10 +17,10 @@ function onOpen() {
       .addToUi();
 }
 
-/**
- * NEW: Status-only Full Payment follow-ups.
- * Sends FP emails ONLY when Column S ("Status") == "FOR FULL PAYMENT".
- * Still stamps Column U ("FP Last Follow-Up Sent") after sending.
+/** NEW: Status-only (optionally %-gated) Full Payment follow-ups.
+ * Sends FP emails ONLY when Column S == "FOR FULL PAYMENT".
+ * Stamps Column U ("FP Last Follow-Up Sent") after sending.
+ * Daily limit applies via same-day stamp check (skip if already today).
  */
 function processUpcomingFpFollowUps_() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -30,51 +30,89 @@ function processUpcomingFpFollowUps_() {
   const lastRow = sheet.getLastRow();
   if (lastRow < 5) return { emailsSent: 0 };
 
-  // Read A..U once
   const dataRange = sheet.getRange('A5:U' + lastRow);
   const values = dataRange.getValues();
 
-  // For stamping U (FP Last Follow-Up Sent)
   const stampRange = sheet.getRange('U5:U' + lastRow);
   const updatedTimestamps = stampRange.getValues();
 
-  // Local helpers
   const isSameDay_ = (d1, d2) =>
-    d1 && d2 &&
-    d1.getFullYear() === d2.getFullYear() &&
-    d1.getMonth() === d2.getMonth() &&
-    d1.getDate() === d2.getDate();
+    d1 && d2 && d1.getFullYear() === d2.getFullYear() &&
+    d1.getMonth() === d2.getMonth() && d1.getDate() === d2.getDate();
 
-  const today = dateOnly_(new Date());
+  const today = new Date(); // dateOnly_ not strictly required for isSameDay_
   let emailsSent = 0;
 
-  // Column map (0-based from A)
   const H = {
-    serial: 0,          // A
-    campaign: 2,        // C
-    name: 3,            // D
-    business: 5,        // F
-    email: 9,           // J
-    givenAmount: 11,    // L
-    fpDueDate: 13,      // N
-    percentage: 14,     // O
-    receivables: 17,    // R
-    status: 18,         // S
-    lastFpFollowUp: 20  // U
+    serial: 0, campaign: 2, name: 3, business: 5, email: 9,
+    givenAmount: 11, fpDueDate: 13, percentage: 14, receivables: 17,
+    status: 18, lastFpFollowUp: 20
   };
 
   values.forEach((row, i) => {
-  try {
-    // ---- REQUIRE % COLUMN O >= 30% ----
-    const pctRaw = row[H.percentage];
-    let pct;
-    if (typeof pctRaw === 'number') {
-      pct = pctRaw > 1 ? pctRaw / 100 : pctRaw;
-    } else {
-      const n = parseFloat(String(pctRaw || '').replace(/[^0-9.-]+/g, ''));
-      pct = isNaN(n) ? 0 : (n > 1 ? n / 100 : n);
+    try {
+      // 1) Status trigger (tolerates common variants)
+      const statusNorm = String(row[H.status] || '').replace(/\s+/g, ' ').trim().toUpperCase();
+      const isForFullPayment = (
+        statusNorm === 'FOR FULL PAYMENT' ||
+        statusNorm === 'FOR FULL PAYEMENT' ||
+        statusNorm === 'FULL PAYMENT' ||
+        statusNorm === 'FOR FULLPAYMENT'
+      );
+      if (!isForFullPayment) return;
+
+      // 2) Optional ≥30% gate (only when RULES.FP_REQUIRE_30PCT = true)
+      if (RULES.FP_REQUIRE_30PCT) {
+        const pctRaw = row[H.percentage];
+        let pct;
+        if (typeof pctRaw === 'number') pct = pctRaw > 1 ? pctRaw / 100 : pctRaw;
+        else {
+          const n = parseFloat(String(pctRaw || '').replace(/[^0-9.-]+/g, ''));
+          pct = isNaN(n) ? 0 : (n > 1 ? n / 100 : n);
+        }
+        if (pct < 0.30) return;
+      }
+
+      // 3) Daily limit for FP follow-ups (skip if already sent today)
+      const lastSent = row[H.lastFpFollowUp];
+      if (lastSent instanceof Date && isSameDay_(lastSent, new Date())) return;
+
+      // 4) Build & send
+      const emailAddr = String(row[H.email] || '').split(/[;,]/)[0].trim();
+      if (!emailAddr) return;
+
+      const clientName = toTitleCase_(row[H.name] || row[H.business] || firstNameFromEmail_(row[H.email]));
+      const serialNo = row[H.serial];
+      const campaign = row[H.campaign] || 'engagement';
+      const receivablesNum = (typeof row[H.receivables] === 'number') ? row[H.receivables] : 0;
+      const receivablesStr = toPhp_(receivablesNum);
+      const due = row[H.fpDueDate] instanceof Date ? row[H.fpDueDate] : null;
+      const dueStr = due ? fmtDate_(due) : '';
+
+      let email;
+      if (due) {
+        const dOnly = new Date(due.getFullYear(), due.getMonth(), due.getDate());
+        const tOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+        const diffDays = Math.round((dOnly - tOnly) / 86400000);
+        if (diffDays === 0)      email = buildFpDueTodayEmail_({ clientName, serialNo, campaign, receivablesStr });
+        else if (diffDays === 1) email = buildFpReminderEmail_({ clientName, serialNo, campaign, receivablesStr, dueDateStr: dueStr });
+        else if (diffDays < 0)   email = buildFpOverdueEmail_({ clientName, serialNo, campaign, receivablesStr, dueDateStr: dueStr, daysPastDue: Math.abs(diffDays) });
+      }
+      if (!email) email = buildFpReminderEmail_({ clientName, serialNo, campaign, receivablesStr, dueDateStr: dueStr });
+
+      MailApp.sendEmail({ to: emailAddr, subject: email.subject, htmlBody: email.html });
+
+      // 5) Stamp U (FP Last Follow-Up Sent)
+      updatedTimestamps[i][0] = new Date();
+      emailsSent++;
+    } catch (e) {
+      Logger.log(`processUpcomingFpFollowUps_ row ${i + 5} error: ${e.message}`);
     }
-    if (pct < 0.30) return;
+  });
+
+  if (emailsSent > 0) stampRange.setValues(updatedTimestamps);
+  return { emailsSent };
+}
 
     // Idempotency: skip if already sent today
     const lastSent = row[H.lastFpFollowUp];
@@ -221,11 +259,12 @@ const CUTOFF_MINUTE  = 0;
 
 // [PASTE THIS ENTIRE BLOCK into your HELPERS section]
 
-/**
- * Extracts and maps data from the Invoice Encoder form values.
- * @param {any[][]} values - The 2D array of values from the InvoiceDataRange.
- * @returns {object} An object containing all the named data points.
- */
+// --- CONFIG / CONSTANTS ---
+// ... your CONFIG, RULES, etc ...
+
+// --- HELPER FUNCTIONS (extractors, formatters, etc.) ---
+function extractArData_(values) { /* ... */ }
+
 function extractInvoiceData_(values) {
   const IDX = {
     date: 0, tin: 1, fullName: 2, business: 3, address: 4, city: 5, zip: 6,
@@ -247,10 +286,17 @@ function extractInvoiceData_(values) {
   data.clientEmail = values[IDX.email][0];
   data.serialNo = values[IDX.serial][0];
   data.timeSent = new Date();
-  data.amountNum = (typeof data.amountRaw === 'number') ? data.amountRaw : parseFloat(String(data.amountRaw).replace(/[^\d.-]/g, '')) || 0;
+  data.amountNum = (typeof data.amountRaw === 'number')
+    ? data.amountRaw
+    : parseFloat(String(data.amountRaw).replace(/[^\d.-]/g, '')) || 0;
   
   return data;
 }
+
+// --- ENCODER ACTIONS ---
+function encodeInvoiceReceipt() { /* uses extractInvoiceData_ */ }
+function encodeAcknowledgementReceipt() { /* uses extractArData_ */ }
+
 
 /**
  * Extracts and maps data from the AR Encoder form values.
