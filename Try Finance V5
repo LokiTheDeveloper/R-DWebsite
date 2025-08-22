@@ -5,7 +5,15 @@
 function onOpen() {
   SpreadsheetApp.getUi()
       .createMenu('Sales Tool')
+      // --- Data Entry Items ---
+      .addItem('Encode Invoice/Receipt', 'encodeInvoiceReceipt') 
+      .addItem('Encode Acknowledgement Receipt', 'encodeAcknowledgementReceipt')
+      .addSeparator()
+      
+      // --- Follow-up Items ---
       .addItem('Send Upcoming FP Follow-Ups', 'sendUpcomingFpFollowUps')
+      .addItem('FORCE Send ALL Daily Follow-Ups (DP & FP)', 'sendDailyFollowUpsForce') // <-- ITO YUNG BAGO
+      
       .addToUi();
 }
 
@@ -41,7 +49,7 @@ function processUpcomingFpFollowUps_() {
   const lastRow = sheet.getLastRow();
   if (lastRow < 5) return { emailsSent: 0 }; 
 
-  // Extend range to Column U for the new timestamp
+  // Optimized: Read the entire range once
   const dataRange = sheet.getRange('A5:U' + lastRow); 
   const values = dataRange.getValues();
   const today = dateOnly_(new Date());
@@ -56,28 +64,44 @@ function processUpcomingFpFollowUps_() {
     lastManualFpFollowUp: 20       // Column U
   };
 
-  const updatedTimestamps = sheet.getRange('U5:U' + lastRow).getValues();
+  // Optimized: Create a copy of timestamps to update in memory. No second sheet read.
+  const updatedTimestamps = values.map(row => [row[H.lastManualFpFollowUp]]);
+  
+  // Helper for date comparison, defined locally for clarity
+  const isSameDay_ = (d1, d2) => d1.getFullYear() === d2.getFullYear() && d1.getMonth() === d2.getMonth() && d1.getDate() === d2.getDate();
 
   values.forEach((row, i) => {
     try {
+      // --- PATCHED: Idempotency Check ---
+      const lastSent = row[H.lastManualFpFollowUp];
+      if (lastSent instanceof Date && isSameDay_(lastSent, new Date())) {
+        return; // Already sent today, do not spam.
+      }
+      
       // --- Condition Checks from your request ---
       const receivables = (typeof row[H.receivables] === 'number') ? row[H.receivables] : 0;
       if (receivables <= 0) return;
 
-      let pctRaw = row[H.percentage];
-      // Ensure percentage is treated as a decimal (e.g., 30% -> 0.3)
-      let pct = (typeof pctRaw === 'number') ? pctRaw : parseFloat(String(pctRaw || "0").replace("%", "").trim()) / 100;
+      // --- PATCHED: Robust Percentage Calculation ---
+      const pctRaw = row[H.percentage];
+      let pct = 0;
+      if (typeof pctRaw === 'number') {
+        // If number is 30, treat as 30%. If it's 0.3, treat as 30%.
+        pct = pctRaw >= 1 ? pctRaw / 100 : pctRaw;
+      } else {
+        // Handle text formats like "30%" or just "30"
+        pct = parseFloat(String(pctRaw || "0").replace(/[^0-9.-]+/g,"")) / 100;
+      }
       if (isNaN(pct) || pct < 0.30) return;
       
       const fpDueDate = row[H.fpDueDate];
       if (!(fpDueDate instanceof Date)) return;
       const dueOnly = dateOnly_(fpDueDate);
-      if (dueOnly < today) return; // Must be today or in the future
+      if (dueOnly < today) return;
 
       const status = String(row[H.status] || '').toUpperCase().trim();
       if (status === 'PAID' || status === 'CANCELLED' || status === 'FORFEITED') return;
       
-      // --- Determine which email to send ---
       const daysUntilDue = Math.round((dueOnly.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
       
       const emailData = {
@@ -89,15 +113,9 @@ function processUpcomingFpFollowUps_() {
       };
 
       let email;
-      if (daysUntilDue === 0) { // Due Today
-        email = buildFpDueTodayEmail_(emailData);
-      } else if (daysUntilDue === 1) { // Due Tomorrow
-        email = buildFpReminderEmail_(emailData);
-      } else {
-        // We will not send emails for dates further out than tomorrow via this manual trigger
-        // to prevent accidental spam. This is a safe default.
-        return; 
-      }
+      if (daysUntilDue === 0) { email = buildFpDueTodayEmail_(emailData); } 
+      else if (daysUntilDue === 1) { email = buildFpReminderEmail_(emailData); } 
+      else { return; }
       
       const clientEmail = String(row[H.email] || '').split(/[;,]/)[0].trim();
       if (clientEmail && email) {
