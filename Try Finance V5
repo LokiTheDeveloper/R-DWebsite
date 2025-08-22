@@ -489,8 +489,6 @@ if (clientEmail) {
 // --- YOUR NEW ROBUST DATA TRANSFER LOGIC ---
 const MIN_ROW = 5;
 
-    // --- YOUR NEW ROBUST DATA TRANSFER LOGIC ---
-    const MIN_ROW = 5;
     const aCol = dbSheet.getRange(MIN_ROW, 1, dbSheet.getMaxRows() - (MIN_ROW - 1), 1).getValues();
     let lastNonEmptyOffset = -1;
     for (let i = aCol.length - 1; i >= 0; i--) {
