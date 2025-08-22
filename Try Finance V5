@@ -26,6 +26,8 @@ const CONFIG = {
   FINANCE_EMAIL: 'finance@rdrcorporation.com',
   FINANCE_PHONE: '0945 559 6470',
   PAYMENT_LINK: 'https://YOUR_PAYMENT_LINK_HERE',
+  CUTOFF_HOUR_24: 17, // 5 PM
+  CUTOFF_MINUTE:  0,
 };
 
 // Cutoff for "Due Today" final reminder (local script timezone)
