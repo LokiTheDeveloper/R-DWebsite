@@ -65,19 +65,29 @@ function processUpcomingFpFollowUps_() {
 
   values.forEach((row, i) => {
     try {
-      // ---- STRICT STATUS TRIGGER ONLY (tolerant to common misspellings) ----
-      const statusNorm = String(row[H.status] || '')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .toUpperCase();
+      // ---- STRICT STATUS TRIGGER + PERCENTAGE CHECK (O >= 30%) ----
+const statusNorm = String(row[H.status] || '')
+  .replace(/\s+/g, ' ')
+  .trim()
+  .toUpperCase();
 
-      const isForFullPayment =
-        statusNorm === 'FOR FULL PAYMENT' ||
-        statusNorm === 'FOR FULL PAYEMENT' ||   // common typo
-        statusNorm === 'FULL PAYMENT' ||
-        statusNorm === 'FOR FULLPAYMENT';
+if (statusNorm !== 'FOR FULL PAYMENT') return;
 
-      if (!isForFullPayment) return;
+// Robust percent read: supports 0.3, 30, "30%"
+const pctRaw = row[H.percentage];
+let pct;
+if (typeof pctRaw === 'number') {
+  // If the cell is a number formatted as %: 0.5 => 50%
+  pct = pctRaw > 1 ? pctRaw / 100 : pctRaw;
+} else {
+  // Text like "30%" or "30"
+  const n = parseFloat(String(pctRaw || '').replace(/[^0-9.-]+/g, ''));
+  pct = isNaN(n) ? 0 : (n > 1 ? n / 100 : n);
+}
+
+// Require at least 30%
+if (pct < 0.30) return;
+
 
       // Idempotency: skip if already sent today
       const lastSent = row[H.lastFpFollowUp];
