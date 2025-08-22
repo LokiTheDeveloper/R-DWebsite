@@ -648,7 +648,7 @@ function buildFpReminderEmail_({ clientName, serialNo, campaign, receivablesStr,
   const subject = `Friendly Reminder: [Billing Invoice #${serialNo}] – Due Tomorrow`;
   const html = `
     <p>Hi ${clientName},</p>
-    <p>I hope you’re doing well. This is a friendly reminder regarding Invoice #${serialNo} for your <b>${campaign}</b> engagement with ${COMPANY_NAME}. Our records indicate a remaining balance of <b>${receivablesStr}</b>, which is due tomorrow, <b>${dueDateStr}</b>.</p>
+    <p>I hope you’re doing well. This is a friendly reminder regarding Invoice #${serialNo} for your <b>${campaign}</b> engagement with ${CONFIG.COMPANY_NAME}. Our records indicate a remaining balance of <b>${receivablesStr}</b>, which is due tomorrow, <b>${dueDateStr}</b>.</p>
     <p>To ensure a smooth process and avoid any late fees or service interruptions, we encourage arranging settlement within the due date.</p>
     ${SHARED_EMAIL_COMPONENTS.paymentMadeIgnore}
     ${SHARED_EMAIL_COMPONENTS.paymentButton}
@@ -663,7 +663,7 @@ function buildFpDueTodayEmail_({ clientName, serialNo, campaign, receivablesStr 
   const subject = `Gentle Reminder: [Billing Invoice #${serialNo}] Due Today (until 5:00 PM)`;
   const html = `
     <p>Hi ${clientName},</p>
-    <p>Hope you’re doing well. Just a gentle check‑in on Invoice #${serialNo} for your <b>${campaign}</b> with ${COMPANY_NAME}. Our records show a remaining balance of <b>${receivablesStr}</b> that’s due today. When convenient, kindly settle on or before <b>5:00 PM</b>.</p>
+    <p>Hope you’re doing well. Just a gentle check‑in on Invoice #${serialNo} for your <b>${campaign}</b> with ${CONFIG.COMPANY_NAME}. Our records show a remaining balance of <b>${receivablesStr}</b> that’s due today. When convenient, kindly settle on or before <b>5:00 PM</b>.</p>
     ${SHARED_EMAIL_COMPONENTS.paymentMadeIgnore}
     ${SHARED_EMAIL_COMPONENTS.paymentButton}
     ${SHARED_EMAIL_COMPONENTS.popInstructions(clientName, campaign, serialNo)}
@@ -677,7 +677,7 @@ function buildFpOverdueEmail_({ clientName, serialNo, campaign, receivablesStr, 
   const subject = `Gentle Reminder: [Billing Invoice #${serialNo}] – Payment ${daysPastDue} Day${daysPastDue > 1 ? 's' : ''} Past Due`;
   const html = `
     <p>Hi ${clientName},</p>
-    <p>Hope you’re doing well. This is a gentle follow-up regarding Invoice #${serialNo} for your <b>${campaign}</b> with ${COMPANY_NAME}. Our records show an outstanding balance of <b>${receivablesStr}</b>, originally due on <b>${dueDateStr}</b>, which is now <b>${daysPastDue} day${daysPastDue > 1 ? 's' : ''} past due</b>.</p>
+    <p>Hope you’re doing well. This is a gentle follow-up regarding Invoice #${serialNo} for your <b>${campaign}</b> with ${CONFIG.COMPANY_NAME}. Our records show an outstanding balance of <b>${receivablesStr}</b>, originally due on <b>${dueDateStr}</b>, which is now <b>${daysPastDue} day${daysPastDue > 1 ? 's' : ''} past due</b>.</p>
     <p>We completely understand that schedules can get busy and payment dates may sometimes be overlooked. To help avoid any late fees or possible service interruptions, we would greatly appreciate it if you could arrange settlement at your earliest convenience.</p>
     ${SHARED_EMAIL_COMPONENTS.paymentMadeIgnore}
     ${SHARED_EMAIL_COMPONENTS.paymentButton}
@@ -693,7 +693,7 @@ function buildFpUrgentEmail_({ clientName, serialNo, campaign, dueDateStr, daysP
   const html = `
     <p>Hi ${clientName},</p>
     <p>I hope this message finds you well.</p>
-    <p>This is an urgent follow-up regarding Invoice #${serialNo} for your <b>${campaign}</b> engagement with ${COMPANY_NAME}. Our records show that the payment is now <b>${daysPastDue} days past due</b> from the agreed due date of <b>${dueDateStr}</b>.</p>
+    <p>This is an urgent follow-up regarding Invoice #${serialNo} for your <b>${campaign}</b> engagement with ${CONFIG.COMPANY_NAME}. Our records show that the payment is now <b>${daysPastDue} days past due</b> from the agreed due date of <b>${dueDateStr}</b>.</p>
     <p>Due to ${daysPastDue} days overdue, the total late payment penalty has increased to thirty percent (30%) of the total contract price in accordance with our payment agreement. The outstanding balance should be settled immediately to avoid further charges and potential service interruption.</p>
     <p><b>Original Contract Price:</b> ${penaltyAmountStr}<br>
     <b>Total of 30% Late Payment Penalty:</b> ${penaltyAmountStr}<br>
@@ -712,14 +712,14 @@ function buildFpForfeitureEmail_({ clientName, serialNo, campaign, dueDateStr, r
   const html = `
     <p>Hi ${clientName},</p>
     <p>I hope this message finds you well.</p>
-    <p>This is a formal and final notice regarding Invoice #${serialNo} for your <b>${campaign}</b> engagement with ${COMPANY_NAME}. Our records show that no payment has been made for the past seven (7) days from the agreed due date of <b>${dueDateStr}</b>.</p>
+    <p>This is a formal and final notice regarding Invoice #${serialNo} for your <b>${campaign}</b> engagement with ${CONFIG.COMPANY_NAME}. Our records show that no payment has been made for the past seven (7) days from the agreed due date of <b>${dueDateStr}</b>.</p>
     <p>In accordance with our official Payment Terms & Conditions, the non-settlement of your outstanding balance within the prescribed period has resulted in the automatic forfeiture of your payment and all services under the contract effective today. This forfeiture is final, non-reversible, and without refund.</p>
     <p><b>Original Contract Price:</b> ${contractPriceStr}<br>
     <b>Outstanding Balance:</b> ${receivablesStr}<br>
     <b>Status:</b> Forfeited as of ${todayStr}</p>
     <p>All services covered by this contract are hereby terminated, and no further reinstatement or grace period will be granted.</p>
-    <p>If you believe this notice has reached you in error, kindly contact us immediately at ${FINANCE_EMAIL}. Otherwise, please be advised that this matter is now considered closed.</p>
-    <p>We thank you for your prior engagement with ${COMPANY_NAME}.</p>
+    <p>If you believe this notice has reached you in error, kindly contact us immediately at ${CONFIG.FINANCE_EMAIL}. Otherwise, please be advised that this matter is now considered closed.</p>
+    <p>We thank you for your prior engagement with ${CONFIG.COMPANY_NAME}.</p>
     ${SHARED_EMAIL_COMPONENTS.signature}`;
   return { subject, html };
 }
