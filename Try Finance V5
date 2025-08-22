@@ -17,7 +17,6 @@ function onOpen() {
       .addToUi();
 }
 
-
 /**
  * NEW: Status-only Full Payment follow-ups.
  * Sends FP emails ONLY when Column S ("Status") == "FOR FULL PAYMENT".
@@ -58,7 +57,7 @@ function processUpcomingFpFollowUps_() {
     email: 9,           // J
     givenAmount: 11,    // L
     fpDueDate: 13,      // N
-    percentage: 14,     // O (not used now, but kept for email text if needed)
+    percentage: 14,     // O
     receivables: 17,    // R
     status: 18,         // S
     lastFpFollowUp: 20  // U
@@ -66,13 +65,19 @@ function processUpcomingFpFollowUps_() {
 
   values.forEach((row, i) => {
     try {
-      // ---- STRICT STATUS TRIGGER ONLY ----
+      // ---- STRICT STATUS TRIGGER ONLY (tolerant to common misspellings) ----
       const statusNorm = String(row[H.status] || '')
         .replace(/\s+/g, ' ')
         .trim()
         .toUpperCase();
 
-      if (statusNorm !== 'FOR FULL PAYMENT') return;
+      const isForFullPayment =
+        statusNorm === 'FOR FULL PAYMENT' ||
+        statusNorm === 'FOR FULL PAYEMENT' ||   // common typo
+        statusNorm === 'FULL PAYMENT' ||
+        statusNorm === 'FOR FULLPAYMENT';
+
+      if (!isForFullPayment) return;
 
       // Idempotency: skip if already sent today
       const lastSent = row[H.lastFpFollowUp];
@@ -131,6 +136,7 @@ function processUpcomingFpFollowUps_() {
 
   return { emailsSent };
 }
+
 
 function sendUpcomingFpFollowUps() {
   const ui = (function(){ try { return SpreadsheetApp.getUi(); } catch(e) { return null; } })();
