@@ -1,8 +1,121 @@
 /**
+ * Creates a custom menu in the spreadsheet UI when the file is opened.
  * @OnlyCurrentDoc
- * This script creates a custom menu to automate invoice and receipt processing,
- * and to send follow-up emails based on data in the spreadsheet.
  */
+function onOpen() {
+  SpreadsheetApp.getUi()
+      .createMenu('Sales Tool')
+      .addItem('Send Upcoming FP Follow-Ups', 'sendUpcomingFpFollowUps')
+      .addToUi();
+}
+
+/**
+ * A wrapper function triggered by the UI menu to send upcoming full payment follow-ups.
+ * Handles UI alerts for success or failure.
+ */
+function sendUpcomingFpFollowUps() {
+  const ui = SpreadsheetApp.getUi();
+  try {
+    const result = processUpcomingFpFollowUps_();
+    ui.alert('Upcoming FP Follow-Ups Complete', 
+             `${result.emailsSent} follow-up emails have been sent.`, 
+             ui.ButtonSet.OK);
+  } catch (e) {
+    Logger.log(`Error in sendUpcomingFpFollowUps: ${e.message}`);
+    ui.alert('An Error Occurred', e.message, ui.ButtonSet.OK);
+  }
+}
+
+/**
+ * Processes the EntryDatabase to find and email clients with upcoming full payments.
+ * Triggered manually from the UI.
+ * - Checks for receivables > 0, paid % >= 30%, status is not final, and FP due date is today or tomorrow.
+ * - Stamps Column U on the corresponding row after sending an email.
+ * @returns {{emailsSent: number}} An object containing the count of emails sent.
+ */
+function processUpcomingFpFollowUps_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(CONFIG.SHEET_NAMES.DATABASE);
+  if (!sheet) throw new Error(`Sheet '${CONFIG.SHEET_NAMES.DATABASE}' not found.`);
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 5) return { emailsSent: 0 }; 
+
+  // Extend range to Column U for the new timestamp
+  const dataRange = sheet.getRange('A5:U' + lastRow); 
+  const values = dataRange.getValues();
+  const today = dateOnly_(new Date());
+  let emailsSent = 0;
+  
+  const H = { 
+    serial: 0, campaign: 2, name: 3, business: 5, email: 9, 
+    givenAmount: 11, fpDueDate: 13, // Column N
+    percentage: 14,                // Column O
+    receivables: 17,               // Column R
+    status: 18,                    // Column S
+    lastManualFpFollowUp: 20       // Column U
+  };
+
+  const updatedTimestamps = sheet.getRange('U5:U' + lastRow).getValues();
+
+  values.forEach((row, i) => {
+    try {
+      // --- Condition Checks from your request ---
+      const receivables = (typeof row[H.receivables] === 'number') ? row[H.receivables] : 0;
+      if (receivables <= 0) return;
+
+      let pctRaw = row[H.percentage];
+      // Ensure percentage is treated as a decimal (e.g., 30% -> 0.3)
+      let pct = (typeof pctRaw === 'number') ? pctRaw : parseFloat(String(pctRaw || "0").replace("%", "").trim()) / 100;
+      if (isNaN(pct) || pct < 0.30) return;
+      
+      const fpDueDate = row[H.fpDueDate];
+      if (!(fpDueDate instanceof Date)) return;
+      const dueOnly = dateOnly_(fpDueDate);
+      if (dueOnly < today) return; // Must be today or in the future
+
+      const status = String(row[H.status] || '').toUpperCase().trim();
+      if (status === 'PAID' || status === 'CANCELLED' || status === 'FORFEITED') return;
+      
+      // --- Determine which email to send ---
+      const daysUntilDue = Math.round((dueOnly.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+      
+      const emailData = {
+        clientName: toTitleCase_(row[H.name] || row[H.business] || firstNameFromEmail_(row[H.email])),
+        serialNo: row[H.serial],
+        campaign: row[H.campaign] || 'engagement',
+        receivablesStr: toPhp_(receivables),
+        dueDateStr: fmtDate_(dueOnly),
+      };
+
+      let email;
+      if (daysUntilDue === 0) { // Due Today
+        email = buildFpDueTodayEmail_(emailData);
+      } else if (daysUntilDue === 1) { // Due Tomorrow
+        email = buildFpReminderEmail_(emailData);
+      } else {
+        // We will not send emails for dates further out than tomorrow via this manual trigger
+        // to prevent accidental spam. This is a safe default.
+        return; 
+      }
+      
+      const clientEmail = String(row[H.email] || '').split(/[;,]/)[0].trim();
+      if (clientEmail && email) {
+        MailApp.sendEmail({ to: clientEmail, subject: email.subject, htmlBody: email.html });
+        updatedTimestamps[i][0] = new Date();
+        emailsSent++;
+      }
+    } catch (e) {
+      Logger.log(`Error processing manual FP Follow-up for row ${i + 5} (Serial: ${row[H.serial]}): ${e.message}`);
+    }
+  });
+
+  if (emailsSent > 0) {
+    sheet.getRange('U5:U' + lastRow).setValues(updatedTimestamps);
+  }
+  
+  return { emailsSent };
+}
 
 // --- CONFIGURATION CONSTANTS ---
 const CONFIG = {
@@ -26,8 +139,6 @@ const CONFIG = {
   FINANCE_EMAIL: 'finance@rdrcorporation.com',
   FINANCE_PHONE: '0945 559 6470',
   PAYMENT_LINK: 'https://YOUR_PAYMENT_LINK_HERE',
-  CUTOFF_HOUR_24: 17, // 5 PM
-  CUTOFF_MINUTE:  0,
 };
 
 // Cutoff for "Due Today" final reminder (local script timezone)
