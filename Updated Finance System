@@ -213,7 +213,7 @@ function extractArData_(values) { /* ... */ }
 function extractInvoiceData_(values) {
   const IDX = {
     date: 0, tin: 1, fullName: 2, business: 3, address: 4, city: 5, zip: 6,
-    campaign: 7, amount: 8, dpDue: 9, fpDue: 10, email: 11, serial: 12, timeSent: 13
+    campaign: 7, amount: 13, dpDue: 9, fpDue: 10, email: 11, serial: 12, timeSent: 13
   };
   
   const data = {};
@@ -250,7 +250,7 @@ function encodeAcknowledgementReceipt() { /* uses extractArData_ */ }
  */
 function extractArData_(values) {
   const displayValues = SpreadsheetApp.getActive().getRangeByName(CONFIG.NAMED_RANGES.AR_DATA).getDisplayValues();
-  const IDX = { date: 0, amount: 4, mode: 5, serial: 6, arNum: 7, name: 8, email: 10 };
+  const IDX = { date: 0, amount: NEW_AMOUNT_INDEX, mode: 5, serial: 6, arNum: 7, name: 8, email: 10 };
 
   const data = {};
   data.dateReceived = values[IDX.date][0];
@@ -369,7 +369,7 @@ function encodeInvoiceReceipt() {
 
     const IDX = {
       date: 0, tin: 1, fullName: 2, business: 3, address: 4, city: 5, zip: 6,
-      campaign: 7, amount: 8, dpDue: 9, fpDue: 10, email: 11, serial: 12, timeSent: 13
+      campaign: 7, amount: 13, dpDue: 9, fpDue: 10, email: 11, serial: 12, timeSent: 13
     };
 
     const requiredIdx = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12];
