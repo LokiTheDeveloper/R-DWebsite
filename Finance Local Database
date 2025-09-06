@@ -30,29 +30,36 @@ function processUpcomingFpFollowUps_() {
   const lastRow = sheet.getLastRow();
   if (lastRow < 5) return { emailsSent: 0 };
 
-  // Use dynamic header map instead of hardcoded object
-  const H = createHeaderMap_(sheet);
-  const FP_STATUSES = ['FOR FULL PAYMENT', 'FOR FULL PAYEMENT', 'FULL PAYMENT', 'FOR FULLPAYMENT'];
-
-  const dataRange = sheet.getRange(5, 1, lastRow - 4, sheet.getLastColumn()); // Read all columns dynamically
+  const dataRange = sheet.getRange('A5:U' + lastRow);
   const values = dataRange.getValues();
-  const stampRange = sheet.getRange(5, H['FP Last Follow-Up Sent'] + 1, lastRow - 4, 1);
+
+  const stampRange = sheet.getRange('U5:U' + lastRow);
   const updatedTimestamps = stampRange.getValues();
-  
+
   const isSameDay_ = (d1, d2) =>
     d1 && d2 &&
     d1.getFullYear() === d2.getFullYear() &&
     d1.getMonth() === d2.getMonth() &&
     d1.getDate() === d2.getDate();
-    
+
   const today = new Date();
   let emailsSent = 0;
 
+  const H = {
+    serial: 0, campaign: 2, name: 3, business: 5, email: 9,
+    givenAmount: 11, fpDueDate: 13, percentage: 14, receivables: 17,
+    status: 18, lastFpFollowUp: 20
+  };
+
   values.forEach((row, i) => {
     try {
-      // 1) Status trigger (now robust and clean)
-      const statusNorm = String(row[H['Status']] || '').replace(/\s+/g, ' ').trim().toUpperCase();
-      const isForFullPayment = FP_STATUSES.includes(statusNorm);
+      // 1) Status trigger (tolerates common variants)
+      const statusNorm = String(row[H.status] || '').replace(/\s+/g, ' ').trim().toUpperCase();
+      const isForFullPayment =
+        statusNorm === 'FOR FULL PAYMENT' ||
+        statusNorm === 'FOR FULL PAYEMENT' ||
+        statusNorm === 'FULL PAYMENT' ||
+        statusNorm === 'FOR FULLPAYMENT';
       if (!isForFullPayment) return;
 
       // 2) Optional ≥30% gate
@@ -100,7 +107,7 @@ function processUpcomingFpFollowUps_() {
       // 5) Stamp U (FP Last Follow-Up Sent)
       updatedTimestamps[i][0] = new Date();
       emailsSent++;
-     } catch (e) {
+    } catch (e) {
       Logger.log(`processUpcomingFpFollowUps_ row ${i + 5} error: ${e.message}`);
     }
   });
@@ -235,16 +242,6 @@ function extractInvoiceData_(values) {
 function encodeInvoiceReceipt() { /* uses extractInvoiceData_ */ }
 function encodeAcknowledgementReceipt() { /* uses extractArData_ */ }
 
-function createHeaderMap_(sheet, headerRow = 4) {
-  const headers = sheet.getRange(headerRow, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const headerMap = {};
-  headers.forEach((header, i) => {
-    if (header) {
-      headerMap[header.toString().trim()] = i;
-    }
-  });
-  return headerMap;
-}
 
 /**
  * Extracts and maps data from the AR Encoder form values.
@@ -338,7 +335,7 @@ function buildDownpaymentEmail_({
   const contractPrice = toPhp_(givenAmount);
   const dp30 = toPhp_(Number(givenAmount) * 0.30);
   const subject = `Down Payment Requirement – Minimum 30% [Billing Invoice #${invoiceSerial}] – Payable Within 3 Days`;
-  const buttonHtml = `<a href="${paymentLink}" style="background-color:#007bff;color:#fff;padding:10px 16px;text-decoration:none;border-radius:6px;display:inline-block;">View Payment Options</a>`;
+  const buttonHtml = `<a href="https://drive.google.com/file/d/1MtbrPe711nRZrVnRQkYrxo16y0Q2rAcw/view?usp=sharing" style="background-color:#007bff;color:#fff;padding:10px 16px;text-decoration:none;border-radius:6px;display:inline-block;">View Payment Options</a>`;
   const body = `
   <p>Hi <b>${toTitleCase_(clientNameSafe)}</b>,</p>
   <p>It was a pleasure meeting with you regarding your <b>${campaign || 'engagement'}</b> with <b>${companyName}</b>.</p>
@@ -359,29 +356,22 @@ function buildDownpaymentEmail_({
   return { subject, html: body };
 }
 
-// [REPLACE your entire encodeInvoiceReceipt function with this]
 function encodeInvoiceReceipt() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const ui = safeGetUi_();
-  const lock = LockService.getScriptLock(); // <-- ADD LOCK
-
   try {
-    if (!lock.tryLock(10000)) { // Wait up to 10 seconds
-      throw new Error('Could not process. Another operation is in progress. Please wait and try again.');
-    }
-
     const sheet = ss.getSheetByName(CONFIG.SHEET_NAMES.INVOICE_ENCODER);
     const dbSheet = ss.getSheetByName(CONFIG.SHEET_NAMES.DATABASE);
 
     const dataRange = ss.getRangeByName(CONFIG.NAMED_RANGES.INVOICE_DATA);
     if (!dataRange) throw new Error(`Named Range "${CONFIG.NAMED_RANGES.INVOICE_DATA}" not found.`);
     const values = dataRange.getValues();
-    
-    // Data extraction and validation remains the same...
+
     const IDX = {
       date: 0, tin: 1, fullName: 2, business: 3, address: 4, city: 5, zip: 6,
       campaign: 7, amount: 8, dpDue: 9, fpDue: 10, email: 11, serial: 12, timeSent: 13
     };
+
     const requiredIdx = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12];
     for (const i of requiredIdx) {
       if (values[i][0] === '') throw new Error('Please fill all required fields (O12-O21, O23-O24). Note: Full Payment Due Date (O22) is optional.');
@@ -402,22 +392,41 @@ function encodeInvoiceReceipt() {
     const serialNo = values[IDX.serial][0];
     const timeSent = new Date();
     const amountNum = (typeof amountRaw === 'number') ? amountRaw : parseFloat(String(amountRaw).replace(/[^\d.-]/g, '')) || 0;
-    
-    // PDF and Email logic remains the same...
+
     const pdfBlob = exportSheetRangeToPdf_(CONFIG.SHEET_NAMES.INVOICE_ENCODER, CONFIG.NAMED_RANGES.INVOICE_PDF, `Invoice-${serialNo}.pdf`);
+
     const { subject: dpSubject, html: dpHtml } = buildDownpaymentEmail_({
       fullName: clientName, business: business, campaign: campaign, meetingDate: entryDate,
       givenAmount: amountNum, invoiceSerial: serialNo,
     });
+
     MailApp.sendEmail({ to: clientEmail, subject: dpSubject, htmlBody: dpHtml, attachments: [pdfBlob] });
 
-    // --- EFFICIENT & ROBUST DATA TRANSFER ---
-    const newRowData = [
+    // --- SMART DATA TRANSFER (robust, bottom-scan on A5:A, with collision guard) ---
+    const MIN_ROW = 5;
+    const aCol = dbSheet.getRange(MIN_ROW, 1, dbSheet.getMaxRows() - (MIN_ROW - 1), 1).getValues();
+
+    let lastNonEmptyOffset = -1;
+    for (let i = aCol.length - 1; i >= 0; i--) {
+      if (aCol[i][0] !== "" && aCol[i][0] !== null) {
+        lastNonEmptyOffset = i;
+        break;
+      }
+    }
+
+    let firstEmptyRow = (lastNonEmptyOffset === -1) ? MIN_ROW : (MIN_ROW + lastNonEmptyOffset + 1);
+
+    const newRowData = [[
       serialNo, entryDate, campaign, clientName, tin, business, address,
       city, zip, clientEmail, timeSent, amountNum, dpDueDate, fpDueDate
-    ];
-    // This is much faster and safer. Assumes order of data matches columns A-N.
-    dbSheet.appendRow(newRowData);
+    ]];
+
+    const targetCell = dbSheet.getRange(firstEmptyRow, 1).getValue();
+    if (targetCell !== "" && targetCell !== null) {
+      firstEmptyRow++;
+    }
+
+    dbSheet.getRange(firstEmptyRow, 1, 1, 14).setValues(newRowData);
     // --- END OF NEW LOGIC ---
 
     const clearRange = ss.getRangeByName(CONFIG.NAMED_RANGES.INVOICE_CLEAR);
@@ -427,8 +436,6 @@ function encodeInvoiceReceipt() {
   } catch (e) {
     Logger.log(`Error in encodeInvoiceReceipt: ${e.message}`);
     if (ui) ui.alert('An Error Occurred', e.message, ui.ButtonSet.OK);
-  } finally {
-    if (lock) lock.releaseLock(); // <-- RELEASE LOCK
   }
 }
 
